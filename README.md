@@ -1,7 +1,7 @@
 # 🌍 SemanticSeg4EO
 ### Semantic Segmentation for Earth Observation
 
-Un framework complet pour la segmentation sémantique d’images satellites, compatible multiclasse et binaire, avec des architectures state-of-the-art.
+A complete framework for semantic segmentation of satellite imagery, supporting both multi-class and binary segmentation with state-of-the-art architectures and advanced geospatial features.
 
 ---
 
@@ -25,31 +25,31 @@ Un framework complet pour la segmentation sémantique d’images satellites, com
 # ✨ Features
 
 ## 🏗️ Model Architectures
-- **UNet-ALG** (architecture custom avec dropout)
+- **UNet-ALG** (custom architecture with dropout)
 - UNet++, DeepLabV3+, FPN, PSPNet, MANet, PAN, LinkNet  
-- Encoders : ResNet, EfficientNet, MobileNet, VGG, DenseNet…
-- Compatible **segmentation_models_pytorch**
+- Support for ResNet, EfficientNet, MobileNet, VGG, DenseNet…
+- Fully compatible with **segmentation_models_pytorch (SMP)**
 
 ## 🎯 Segmentation Types
-- **Multi-Class Segmentation** (jusqu’à 6 classes)
-- **Binary Segmentation** (gestion du déséquilibre)
+- **Multi-Class Segmentation** (up to 6 classes)
+- **Binary Segmentation** (with class imbalance handling)
 
 ## 🚀 Advanced Features
-- Augmentation multi-canaux optimisée satellite
-- Early stopping multi-métriques
-- Checkpoints automatiques
-- Support géoréférencement (.tif)
-- Tiling / reconstruction automatique grandes images
-- Metrics avancées : IoU, F1, Precision, Recall
+- Multi-channel satellite data augmentation  
+- Multi-metric early stopping  
+- Automatic checkpoint saving  
+- Georeferenced TIFF support  
+- Automatic tiling & stitching for large images  
+- Advanced metrics: IoU, F1-score, Precision, Recall  
 
 ---
 
 # 📥 Installation
 
-## Prérequis
+## Requirements
 - Python **3.8+**
 - PyTorch **1.10+**
-- CUDA **11.0+** recommandé
+- CUDA **11.0+** recommended
 
 ## Installation
 ```bash
@@ -76,7 +76,7 @@ scipy>=1.7.0
 
 # 📁 Data Structure
 
-## Dataset Structure
+## Expected Directory Layout
 ```
 dataset_root/
 ├── Patch/
@@ -92,10 +92,10 @@ dataset_root/
 ```
 
 ### Image Format
-- Images : `.tif` multi-canaux (4 ou 10 canaux)
-- Labels : `.tif` masques segmentation
-- Multi-class : valeurs 0 → N-1
-- Binary : 0 ou 1
+- Images: multi-channel `.tif` files (4 or 10 channels)
+- Labels: `.tif` segmentation masks  
+- Multi-class: values 0 to N-1  
+- Binary: 0 or 1  
 
 ---
 
@@ -115,10 +115,10 @@ python main.py \
   --learning_rate 0.001
 ```
 
-### Paramètres principaux
-- `--model` : unet-alg, unet, unet++, deeplabv3, deeplabv3+, fpn, pspnet, manet, pan, linknet
-- `--encoder_name` : resnet34 par défaut
-- `--device` : cuda / cpu
+### Main Parameters
+- `--model`: unet-alg, unet, unet++, deeplabv3, deeplabv3+, fpn, pspnet, manet, pan, linknet  
+- `--encoder_name`: resnet34 by default  
+- `--device`: cuda / cpu  
 
 ---
 
@@ -139,8 +139,8 @@ python main_binary.py \
   --use_class_weights
 ```
 
-### Paramètres spécifiques
-- `--in_channels`  
+### Binary-Specific Parameters
+- `--in_channels` (10 for Sentinel-2)
 - `--use_class_weights`
 - `--patch_size`
 
@@ -148,7 +148,7 @@ python main_binary.py \
 
 # 🔮 Inference
 
-## 🔹 Inference (Single Patch - Multi-Class)
+## 🔹 Single Patch (Multi-Class)
 ```bash
 python inference_one_patch.py \
   --model_dir /path/to/models \
@@ -157,7 +157,7 @@ python inference_one_patch.py \
   --output_dir ./predictions
 ```
 
-## 🔹 Inference (Single Patch - Binary)
+## 🔹 Single Patch (Binary)
 ```bash
 python inference_binary.py \
   --model_dir /path/to/models \
@@ -196,10 +196,10 @@ python predict_large_image_binary.py \
 
 # 🏗️ Supported Architectures
 
-### Custom
-- **unet-alg**
+### Custom Architecture
+- **unet-alg** (optimized for satellite imagery)
 
-### SMP Architectures (SMP)
+### SMP Architectures
 - unet  
 - unet++  
 - deeplabv3 / deeplabv3+  
@@ -209,7 +209,7 @@ python predict_large_image_binary.py \
 - pan  
 - linknet  
 
-### Encoders
+### Available Encoders
 - ResNet 18–152  
 - EfficientNet b0–b7  
 - DenseNet, VGG, MobileNet  
@@ -218,7 +218,7 @@ python predict_large_image_binary.py \
 
 # 💾 Model Format
 
-### Fichiers générés
+### Generated Files
 - `{model_name}_final_model.pth`
 - `{model_name}_best_loss.pth`
 - `{model_name}_best_iou.pth`
@@ -226,19 +226,19 @@ python predict_large_image_binary.py \
 - `{model_name}_metrics.json`
 - `{model_name}_training_plot.png`
 
-### Métadonnées incluses
-- architecture
-- input channels
-- nombre de classes
-- paramètres d’entraînement
-- performances
-- géoréférencement
+### Included Metadata
+- Architecture  
+- Input channels  
+- Number of classes  
+- Training parameters  
+- Performance metrics  
+- Georeferencing info  
 
 ---
 
 # 🚀 Examples
 
-## 1️⃣ Binary Pipeline (Water detection)
+## 1️⃣ Binary Pipeline (Water Detection)
 
 ```bash
 python main_binary.py \
@@ -255,7 +255,7 @@ python main_binary.py \
   --learning_rate 0.0005
 ```
 
-Inference :
+Inference:
 ```bash
 python predict_large_image_binary.py \
   --model ./models/water_detection/unet++_final_model.pth \
@@ -268,7 +268,7 @@ python predict_large_image_binary.py \
 
 ---
 
-## 2️⃣ Multi-Class Pipeline
+## 2️⃣ Multi-Class Pipeline  
 ```bash
 python main.py \
   --dataset_root /data/landcover \
@@ -285,49 +285,50 @@ python main.py \
 
 # 💡 Tips and Best Practices
 
-### 📉 Small datasets
-- `--data_augmentation`
-- `--use_class_weights`
-- `--pretrained`
-- augmenter dropout
+### 📉 Small Datasets
+- Enable `--data_augmentation`
+- Use `--use_class_weights`
+- Use pretrained encoders
+- Increase dropout rate
 
-### 🗺️ Large images
-- patch_size : 256–512
-- overlap ≥ 25%
+### 🗺️ Large Images
+- Patch size: 256–512
+- Overlap: ≥ 25% of patch size
 
-### ⚖️ Binary threshold
-- 0.3 = sensible  
-- 0.5 = équilibré  
-- 0.7 = conservateur  
+### ⚖️ Binary Thresholding
+- **0.3** → more sensitive  
+- **0.5** → balanced default  
+- **0.7** → conservative  
 
-### 🚀 Performance
-- utiliser CUDA  
-- réduire batch_size si OOM  
-- réduire patch_size en inference  
+### 🚀 Performance Optimization
+- Use the GPU (`--device cuda`)
+- Reduce `batch_size` if OOM
+- Reduce `patch_size` for inference
 
 ---
 
 # 🐛 Troubleshooting
 
-### "No images found"
-- Vérifier `.tif`
-- Structure `images/` et `labels/`
+### ❌ "No images found"
+- Ensure `.tif` format
+- Check folder structure
 
-### "Channel mismatch"
+### ❌ "Channel mismatch"
 ```
 Expected input channels: 10, received: 4
 ```
-→ ajuster `--in_channels`
+→ Adjust `--in_channels`
 
-### OOM Erreur
-- réduire batch_size
-- réduire patch_size
+### ❌ Out of Memory (OOM)
+- Lower batch size  
+- Reduce patch size  
 
-### "Model not found"
-- Vérifier noms modèles `.pth`
+### ❌ Model not found
+- Check `.pth` filenames  
+- Verify `--model_name`  
 
-### Artifacts bordures patch
-- augmenter `--overlap`
+### ❌ Patch border artifacts
+- Increase `--overlap`
 
 ---
 
@@ -345,19 +346,19 @@ Expected input channels: 10, received: 4
 ---
 
 # 📄 License
-Projet sous licence **MIT**.
+This project is released under the **MIT License**.
 
 ---
 
 # 🤝 Contributing
-1. Fork le repo  
-2. Crée une branch  
-3. Commit  
-4. Push  
-5. Pull Request  
+1. Fork this repository  
+2. Create a feature branch  
+3. Commit your changes  
+4. Push the branch  
+5. Open a Pull Request  
 
 ---
 
 # 📧 Contact
-- Ouvrir une issue GitHub  
-- Contacter l’équipe de développement  
+- Open a GitHub issue  
+- Contact the development team  
