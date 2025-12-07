@@ -134,8 +134,18 @@ For each extracted patch, the script produces:
   - CRS
   - dataset split (train/val/test)
 
-All patches are saved under:
-
+ CLI Exemple : 
+python Patch_extraction.py \
+    --image path/to/image.tif \
+    --label path/to/label.tif \
+    --grid path/to/grid.shp \
+    --patch_size 256 \
+    --train_ratio 0.7 \
+    --val_ratio 0.15 \
+    --test_ratio 0.15 \
+    --interpolation bilinear \
+    --output path/to/patches \
+    --save_metadata
 
 # Data Structure
 
