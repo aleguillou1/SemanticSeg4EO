@@ -134,7 +134,10 @@ For each extracted patch, the script produces:
   - CRS
   - dataset split (train/val/test)
 
- CLI Exemple : 
+
+## Example Usage
+
+```bash
 python Patch_extraction.py \
     --image path/to/image.tif \
     --label path/to/label.tif \
@@ -146,6 +149,7 @@ python Patch_extraction.py \
     --interpolation bilinear \
     --output path/to/patches \
     --save_metadata
+
 
 # Data Structure
 
