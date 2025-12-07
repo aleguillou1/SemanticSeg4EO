@@ -252,6 +252,8 @@ python main_binary.py \
 
 ---
 
+![Example Prediction](figs/img1.png)
+
 # Troubleshooting
 
 ### Dataset Not Detected  
