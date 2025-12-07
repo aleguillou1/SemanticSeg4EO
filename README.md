@@ -252,7 +252,7 @@ python main_binary.py \
 
 ---
 
-![Example Prediction](figs/img1.png)
+![Example Prediction](figs/img1.jpg)
 
 # Troubleshooting
 
