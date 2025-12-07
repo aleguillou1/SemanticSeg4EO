@@ -40,7 +40,7 @@ SemanticSeg4EO has been developed to support experiments in semantic segmentatio
 
 ### Segmentation Capabilities
 - Multi-class segmentation (default configuration supports up to six classes, extendable).
-- Binary segmentation with optional class-weighting to manage class imbalance.
+- Binary segmentation with optional class-weighting to manage class imbalance (for sentinel-2 data).
 
 ### Additional Technical Features
 - Multi-channel support (including Sentinel-2 data with up to 10 spectral bands).
