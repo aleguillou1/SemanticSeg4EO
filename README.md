@@ -149,7 +149,7 @@ python Patch_extraction.py \
     --interpolation bilinear \
     --output path/to/patches \
     --save_metadata
-
+```
 
 # Data Structure
 
