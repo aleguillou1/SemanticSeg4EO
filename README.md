@@ -9,6 +9,7 @@ SemanticSeg4EO is a research-oriented framework dedicated to the semantic segmen
 - [Overview](#overview)
 - [Features](#features)
 - [Installation](#installation)
+- [Patch Extraction](#Patch-Extraction)
 - [Data Structure](#data-structure)
 - [Training Procedures](#training-procedures)
 - [Inference](#inference)
@@ -80,6 +81,61 @@ scipy>=1.7.0
 ```
 
 ---
+
+## Patch Extraction
+
+SemanticSeg4EO includes an optional yet powerful patch extraction module designed to generate ready-to-use training, validation, and test datasets from large satellite scenes.  
+This module extracts fixed-size patches of both imagery and labels using a user-provided grid shapefile, ensuring perfect spatial alignment and fully controlled dataset partitioning.
+
+The extraction script (`Patch_extraction.py`) supports:
+- Multiband raster files (e.g., Sentinel-2, Landsat, harmonized products, custom rasters)
+- Arbitrary patch sizes
+- Multiple interpolation strategies
+- Train/val/test splitting with reproducibility
+- Optional metadata generation for downstream tracking
+
+## How Patch Extraction Works
+
+The patch extraction pipeline consists of four stages:
+
+### 1. Grid-Based Cropping
+You provide a polygon grid shapefile (regular or irregular).  
+For each polygon, the extractor:
+- crops the corresponding area from the input image (GeoTIFF)
+- crops the same area from the label raster
+- preserves geospatial metadata (CRS, transform)
+- ensures perfect pixel and spatial alignment
+
+Cropping is performed using `rasterio.mask.mask()`, which guarantees accurate, georeferenced extractions.
+
+### 2. Automatic Resizing
+If the extracted region does not match the desired patch size:
+- image patches are resized using the selected interpolation (`nearest`, `bilinear`, `bicubic`, `lanczos`)
+- label patches are resized using nearest-neighbor only, ensuring class integrity
+
+### 3. Dataset Splitting
+Patches are automatically assigned to:
+- Training set
+- Validation set
+- Test set
+
+Proportions are fully configurable through command-line arguments.  
+A deterministic random seed guarantees reproducibility of the split.
+
+### 4. Structured Patch Export
+For each extracted patch, the script produces:
+- one image patch (`.tif` or `.png`)
+- one label patch (same naming convention)
+- optional metadata (`.json`) storing:
+  - patch ID
+  - polygon ID
+  - source file name
+  - bounding box
+  - CRS
+  - dataset split (train/val/test)
+
+All patches are saved under:
+
 
 # Data Structure
 
