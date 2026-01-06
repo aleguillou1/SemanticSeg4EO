@@ -1,166 +1,110 @@
 # SemanticSeg4EO
-### A Framework for Semantic Segmentation of Earth Observation Imagery
 
-SemanticSeg4EO is a research-oriented framework dedicated to the semantic segmentation of satellite imagery. It provides tools for both multi-class and binary segmentation and integrates a broad set of established deep learning architectures adapted for remote sensing applications. The framework emphasizes methodological transparency, reproducibility, and flexibility, allowing users to modify architectural components, preprocessing strategies, and training settings.
+**A Unified Framework for Semantic Segmentation of Earth Observation Imagery**
 
----
+SemanticSeg4EO is a comprehensive framework for semantic segmentation of satellite imagery, supporting both binary and multi-class segmentation through a unified codebase. The system integrates advanced deep learning architectures specifically adapted for remote sensing applications, with emphasis on methodological transparency, reproducibility, and experimental flexibility.
 
 ## Table of Contents
+
 - [Overview](#overview)
-- [Features](#features)
+- [Key Features](#key-features)
 - [Installation](#installation)
-- [Patch Extraction](#Patch-Extraction)
-- [Data Structure](#data-structure)
-- [Training Procedures](#training-procedures)
-- [Inference](#inference)
-- [Supported Architectures](#supported-architectures)
-- [Model Output Format](#model-output-format)
+- [Quick Start](#quick-start)
+- [Dataset Preparation](#dataset-preparation)
+- [Patch Extraction](#patch-extraction)
+- [Training System](#training-system)
+- [Inference on Large Images](#inference-on-large-images)
+- [Architecture Support](#architecture-support)
+- [Output Format](#output-format)
 - [Examples](#examples)
-- [Recommended Practices](#recommended-practices)
+- [Best Practices](#best-practices)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 - [Contact](#contact)
 
----
+## Overview
 
-# Overview
-SemanticSeg4EO has been developed to support experiments in semantic segmentation applied to Earth Observation (EO) data. It provides modules for data handling, model training, evaluation, and inference on both small tiles and full-resolution satellite scenes. The design aims to facilitate reproducible research in EO-based land-cover mapping, object detection, and environmental monitoring.
+SemanticSeg4EO provides a unified pipeline for Earth Observation (EO) data segmentation, from data preparation to large-scale inference. The framework combines robust preprocessing, advanced training techniques, and seamless patch-based prediction, making it suitable for both research and production applications in land-cover mapping, environmental monitoring, and change detection.
 
----
+## Key Features
 
-# Features
+### Unified Architecture
+- Single codebase for both binary and multi-class segmentation
+- Automatic mode detection based on configuration
+- Consistent interface across all workflows
 
-### Architectures
-- **Modified U-Net Architecture**  
-  A variant of U-Net incorporating deeper convolutional blocks explicitly defined in the source code.  
-  These additional layers are intended to enhance feature extraction in complex multi-spectral data.  
-  Both **patch size** and **number of classes** are pre-initialized but can be fully overridden via command-line arguments, enabling controlled experimental conditions.
+### Advanced Training Capabilities
+- K-Fold Cross-Validation with comprehensive statistics
+- Multi-channel data augmentation tailored for satellite imagery
+- Class weighting for imbalanced datasets
+- Early stopping and model checkpointing
+- Percentile-based normalization (99th percentile robust normalization)
 
-- **Standard Architectures (via segmentation_models_pytorch)**  
-  UNet, UNet++, DeepLabV3, DeepLabV3+, FPN, PSPNet, MANet, PAN, LinkNet.
+### Flexible Model Support
+- Custom U-Net variants with dropout regularization
+- Segmentation Models PyTorch (SMP) integration:
+  - UNet, UNet++, DeepLabV3, DeepLabV3+
+  - FPN, PSPNet, MANet, PAN, LinkNet
+- TorchVision models support
+- Configurable encoders (ResNet, EfficientNet, etc.)
 
-### Segmentation Capabilities
-- Multi-class segmentation (default configuration supports up to six classes, extendable).
-- Binary segmentation with optional class-weighting to manage class imbalance (for sentinel-2 data).
+### Large-Scale Inference
+- Patch-based prediction with seamless reconstruction
+- Weighted blending to reduce border artifacts
+- Geospatial metadata preservation
+- Confidence map generation
 
-### Additional Technical Features
-- Multi-channel support (including Sentinel-2 data with up to 10 spectral bands).
-- Data augmentation tailored for EO imagery.
-- Early stopping, checkpointing, and metric monitoring.
-- Large-scene inference through patch tiling and reconstruction.
-- Preservation of geospatial metadata for TIFF outputs.
-- Computation of standard segmentation metrics (IoU, F1-score, Precision, Recall).
+### Data Preparation
+- Automatic patch extraction using shapefile grids
+- Train/validation/test splitting with reproducibility
+- Multi-channel support (including Sentinel-2 with 10+ bands)
 
----
-
-# Installation
+## Installation
 
 ### Requirements
-- Python ≥ 3.8  
-- PyTorch ≥ 1.10  
-- CUDA recommended for training and large-scene inference  
+- Python ≥ 3.8
+- PyTorch ≥ 1.10 (with CUDA for GPU acceleration)
+- GPU recommended for training and large-scale inference
 
-### Installation Procedure
+### Installation Steps
 ```bash
+# Clone repository
 git clone https://github.com/your-username/SemanticSeg4EO.git
 cd SemanticSeg4EO
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-Minimal `requirements.txt`:
-```
+### requirements.txt
+```text
 torch>=1.10.0
 torchvision>=0.11.0
-numpy>=1.21.0
-rasterio>=1.2.0
-tifffile>=2021.7.2
 segmentation-models-pytorch>=0.3.0
+rasterio>=1.2.0
+geopandas>=0.10.0
+tifffile>=2021.7.2
+numpy>=1.21.0
 matplotlib>=3.4.0
-tqdm>=4.62.0
 scipy>=1.7.0
+scikit-learn>=0.24.0
+tqdm>=4.62.0
+opencv-python>=4.5.0
 ```
 
----
+## Quick Start
 
-## Patch Extraction
-
-SemanticSeg4EO includes an optional yet powerful patch extraction module designed to generate ready-to-use training, validation, and test datasets from large satellite scenes.  
-This module extracts fixed-size patches of both imagery and labels using a user-provided grid shapefile, ensuring perfect spatial alignment and fully controlled dataset partitioning.
-
-The extraction script (`Patch_extraction.py`) supports:
-- Multiband raster files (e.g., Sentinel-2, Landsat, harmonized products, custom rasters)
-- Arbitrary patch sizes
-- Multiple interpolation strategies
-- Train/val/test splitting with reproducibility
-- Optional metadata generation for downstream tracking
-
-## How Patch Extraction Works
-
-The patch extraction pipeline consists of four stages:
-
-### 1. Grid-Based Cropping
-You provide a polygon grid shapefile (regular or irregular).  
-For each polygon, the extractor:
-- crops the corresponding area from the input image (GeoTIFF)
-- crops the same area from the label raster
-- preserves geospatial metadata (CRS, transform)
-- ensures perfect pixel and spatial alignment
-
-Cropping is performed using `rasterio.mask.mask()`, which guarantees accurate, georeferenced extractions.
-
-### 2. Automatic Resizing
-If the extracted region does not match the desired patch size:
-- image patches are resized using the selected interpolation (`nearest`, `bilinear`, `bicubic`, `lanczos`)
-- label patches are resized using nearest-neighbor only, ensuring class integrity
-
-### 3. Dataset Splitting
-Patches are automatically assigned to:
-- Training set
-- Validation set
-- Test set
-
-Proportions are fully configurable through command-line arguments.  
-A deterministic random seed guarantees reproducibility of the split.
-
-### 4. Structured Patch Export
-For each extracted patch, the script produces:
-- one image patch (`.tif` or `.png`)
-- one label patch (same naming convention)
-- optional metadata (`.json`) storing:
-  - patch ID
-  - polygon ID
-  - source file name
-  - bounding box
-  - CRS
-  - dataset split (train/val/test)
-
-
-## Example Usage
-
-```bash
-python Patch_extraction.py \
-    --image path/to/image.tif \
-    --label path/to/label.tif \
-    --grid path/to/grid.shp \
-    --patch_size 256 \
-    --train_ratio 0.7 \
-    --val_ratio 0.15 \
-    --test_ratio 0.15 \
-    --interpolation bilinear \
-    --output path/to/patches \
-    --save_metadata
-```
-
-# Data Structure
-
-The default dataset structure follows:
-
+### 1. Prepare Data Structure
 ```
 dataset_root/
 ├── Patch/
 │   ├── train/
 │   │   ├── images/
+│   │   │   ├── patch_001.tif
+│   │   │   └── ...
 │   │   └── labels/
+│   │       ├── patch_001.tif
+│   │       └── ...
 │   ├── validation/
 │   │   ├── images/
 │   │   └── labels/
@@ -169,182 +113,418 @@ dataset_root/
 │       └── labels/
 ```
 
-### Image and Label Format
-- Images: multi-band `.tif` files  
-- Labels: `.tif` semantic masks  
-- Multi-class labels: integer encoding from `0` to `N-1`  
-- Binary labels: `0` and `1`  
-
----
-
-# Training Procedures
-
-### Multi-Class Segmentation
+### 2. Train a Model
 ```bash
-python main.py \
-  --dataset_root /path/to/dataset \
-  --model unet++ \
-  --epochs 100 \
-  --batch_size 4 \
-  --save_dir ./trained_models \
-  --encoder_name resnet34 \
-  --pretrained \
-  --dropout_rate 0.5 \
-  --learning_rate 0.001
+# Binary segmentation
+python main.py --mode binary --dataset_root /path/to/data --model unet++
+
+# Multi-class segmentation (6 classes)
+python main.py --mode multiclass --classes 6 --dataset_root /path/to/data --model deeplabv3+
 ```
 
-### Binary Segmentation
+### 3. Predict on Large Image
 ```bash
-python main_binary.py \
-  --dataset_root /path/to/dataset \
-  --model unet++ \
-  --in_channels 10 \
-  --epochs 100 \
-  --batch_size 4 \
-  --save_dir ./trained_models_binary \
-  --encoder_name resnet34 \
-  --pretrained \
-  --dropout_rate 0.5 \
-  --learning_rate 0.001 \
-  --data_augmentation \
-  --use_class_weights
+python Predict_large_image.py --model trained_models/model_final.pth \
+                             --input large_image.tif \
+                             --output prediction.tif
 ```
 
----
+## Dataset Preparation
 
-# Inference
+### Data Format Requirements
 
-### Single-Patch Inference (Multi-Class)
-```bash
-python inference_one_patch.py \
-  --model_dir /path/to/models \
-  --model_name unet++ \
-  --image_path /path/to/image.tif \
-  --output_dir ./predictions
+- **Images**: Multi-band GeoTIFF files (e.g., Sentinel-2 with 10+ bands)
+- **Labels**: Single-band GeoTIFF masks
+  - **Binary**: 0 (background) and 1 (foreground)
+  - **Multi-class**: Integers from 0 to N-1 (where N = number of classes)
+- **Spatial alignment**: Images and masks must have identical georeferencing
+
+### Dataset Structure
+
+The system expects the following directory structure:
+```
+dataset_root/
+└── Patch/
+    ├── train/
+    │   ├── images/    # Training images
+    │   └── labels/    # Training masks
+    ├── validation/
+    │   ├── images/    # Validation images
+    │   └── labels/    # Validation masks
+    └── test/
+        ├── images/    # Test images
+        └── labels/    # Test masks
 ```
 
-### Single-Patch Inference (Binary)
+## Patch Extraction
+
+For large satellite scenes, use the patch extraction module to create training-ready datasets:
+
+### Extraction Command
 ```bash
-python inference_binary.py \
-  --model_dir /path/to/models \
-  --model_name unet++ \
-  --image_path /path/to/image.tif \
-  --threshold 0.3 \
-  --output_dir ./predictions
+python Patch_extraction.py extract \
+    --image /path/to/satellite_image.tif \
+    --label /path/to/ground_truth.tif \
+    --grid /path/to/grid_shapefile.shp \
+    --output /path/to/output_dataset \
+    --patch_size 224 \
+    --image_channels 10 \
+    --train_ratio 0.75 \
+    --val_ratio 0.15 \
+    --test_ratio 0.10 \
+    --save_metadata
 ```
 
-### Large-Scene Inference (Multi-Class)
+### Key Extraction Features
+
+- Grid-based cropping using shapefile polygons
+- Automatic resizing to specified patch size
+- Dataset splitting with reproducible randomization
+- Geospatial metadata preservation
+- Optional metadata JSON for traceability
+
+### Visualization of Extracted Patches
 ```bash
-python predict_large_image.py \
-  --model_path /path/to/model.pth \
-  --input /path/to/large_image.tif \
-  --output /path/to/prediction.tif \
-  --model_name unet++ \
-  --patch_size 512 \
-  --overlap 128 \
-  --device cuda
+python Patch_extraction.py visualize \
+    --output /path/to/output_dataset \
+    --split train \
+    --sample_index 0
 ```
 
-### Large-Scene Inference (Binary)
+## Training System
+
+### Unified Training Interface
+
+The system provides a single entry point (`main.py`) for both segmentation modes:
 ```bash
-python predict_large_image_binary.py \
-  --model /path/to/model.pth \
-  --input /path/to/large_image.tif \
-  --output /path/to/prediction.tif \
-  --patch_size 224 \
-  --overlap 64 \
-  --threshold 0.5
+python main.py --mode [binary|multiclass] [OPTIONS]
 ```
 
----
+### Basic Training Examples
 
-# Supported Architectures
+#### Standard Training (Fixed Split)
+```bash
+# Binary segmentation with data augmentation
+python main.py --mode binary \
+               --dataset_root /path/to/data \
+               --model unet-dropout \
+               --data_augmentation \
+               --use_class_weights \
+               --epochs 100 \
+               --batch_size 4
 
-### Custom Model
-- Modified U-Net with deeper convolutional blocks explicitly defined in code.  
-  This design facilitates controlled experimentation on feature depth and receptive field expansion.
+# Multi-class segmentation with pretrained encoder
+python main.py --mode multiclass \
+               --classes 6 \
+               --dataset_root /path/to/data \
+               --model deeplabv3+ \
+               --encoder_name resnet50 \
+               --pretrained \
+               --epochs 150 \
+               --batch_size 8
+```
 
-### Standard Architectures (via SMP)
-- UNet, UNet++, DeepLabV3, DeepLabV3+, PSPNet, FPN, PAN, MANet, LinkNet.
+#### Cross-Validation Training
+```bash
+# 5-fold cross-validation for robust evaluation
+python main.py --mode multiclass \
+               --classes 5 \
+               --dataset_root /path/to/data \
+               --model unet++ \
+               --val_strategy kfold \
+               --n_splits 5 \
+               --data_augmentation \
+               --use_class_weights
+```
+
+### Available Training Options
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--mode` | Segmentation mode: `binary` or `multiclass` | `binary` |
+| `--dataset_root` | Path to dataset root directory | Required |
+| `--model` | Model architecture name | Required |
+| `--classes` | Number of classes (for multiclass) | 2 |
+| `--val_strategy` | Validation strategy: `split` or `kfold` | `split` |
+| `--epochs` | Number of training epochs | 100 |
+| `--batch_size` | Batch size | 4 |
+| `--learning_rate` | Learning rate | 1e-3 |
+| `--encoder_name` | Encoder backbone name | `resnet34` |
+| `--pretrained` | Use pretrained encoder weights | False |
+| `--data_augmentation` | Enable multi-channel data augmentation | False |
+| `--use_class_weights` | Apply class weights for imbalance | False |
+| `--n_splits` | Number of folds for cross-validation | 5 |
+
+### Training Output
+
+During training, the system generates:
+```
+trained_models/
+├── model_best_loss.pth          # Best validation loss checkpoint
+├── model_best_iou.pth           # Best IoU checkpoint
+├── model_best_combined.pth      # Combined best metrics
+├── model_final_model.pth        # Final trained model
+├── model_metrics.json           # Detailed metrics and history
+└── model_training_plot.png      # Training visualization
+```
+
+## Inference on Large Images
+
+The `Predict_large_image.py` script handles prediction on arbitrarily large satellite scenes:
+
+### Basic Prediction
+```bash
+python Predict_large_image.py --model /path/to/model.pth \
+                             --input /path/to/large_image.tif \
+                             --output /path/to/prediction.tif
+```
+
+### Advanced Prediction Options
+```bash
+# Multi-class with custom parameters
+python Predict_large_image.py \
+    --model /path/to/model.pth \
+    --input large_image.tif \
+    --output prediction.tif \
+    --num_classes 6 \
+    --patch_size 512 \
+    --overlap 128 \
+    --save_confidence \
+    --device cuda
+```
+
+### Prediction Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--model` | Path to trained model (.pth file) | Required |
+| `--input` | Input satellite image | Required |
+| `--output` | Output segmentation map | Required |
+| `--patch_size` | Size of prediction patches | 512 |
+| `--overlap` | Overlap between patches | 128 |
+| `--num_classes` | Number of output classes | Auto-detected |
+| `--threshold` | Confidence threshold (binary) | 0.5 |
+| `--save_confidence` | Save confidence map | False |
+| `--device` | Computation device | `cuda` |
+
+### Seamless Reconstruction
+
+The predictor uses:
+- Weighted blending to eliminate border artifacts
+- Automatic patch tiling with configurable overlap
+- Geospatial metadata preservation
+- Nodata value handling from source images
+
+## Architecture Support
+
+### Available Models
+
+Run the following to see all available models:
+```bash
+python -c "from model_training import get_available_models; print(get_available_models())"
+```
+
+### Model Categories
+
+#### 1. Custom Models
+- `unet-dropout`: Custom U-Net with dropout regularization
+
+#### 2. SMP Models (requires segmentation-models-pytorch)
+- **Encoder-Decoder**: UNet, UNet++, MANet, Linknet, PAN
+- **Pyramid Networks**: FPN, PSPNet
+- **DeepLab Family**: DeepLabV3, DeepLabV3+
+
+#### 3. TorchVision Models
+- **DeepLabV3**: With ResNet50 backbone
 
 ### Supported Encoders
-- ResNet (18 to 152 layers), EfficientNet, DenseNet, VGG, MobileNet, among others.
 
----
+- **ResNet**: 18, 34, 50, 101, 152
+- **EfficientNet**: b0-b7
+- **MobileNet**: v2, v3
+- **DenseNet**: 121, 169, 201, 264
+- **VGG**: 11, 13, 16, 19
+- And more via SMP
 
-# Model Output Format
+## Output Format
 
-During training, the following files are typically generated:
-- `{model_name}_final_model.pth`
-- `{model_name}_best_loss.pth`
-- `{model_name}_best_iou.pth`
-- `{model_name}_best_combined.pth`
-- `{model_name}_metrics.json`
-- `{model_name}_training_plot.png`
+### Model Checkpoints
 
-Embedded metadata includes:
-- Architecture and encoder details  
-- Number of input channels  
-- Number of semantic classes  
-- Training configuration parameters  
-- Quantitative performance indicators  
-- Geospatial metadata, if applicable  
-
----
-
-# Examples
-
-### Binary Water Detection Experiment
-```bash
-python main_binary.py \
-  --dataset_root /data/sentinel2_water \
-  --model unet++ \
-  --in_channels 10 \
-  --epochs 150 \
-  --batch_size 8 \
-  --save_dir ./models/water_detection \
-  --encoder_name efficientnet-b3 \
-  --pretrained \
-  --data_augmentation \
-  --use_class_weights \
-  --learning_rate 0.0005
+Trained models are saved with comprehensive metadata:
+```python
+{
+    'model_state_dict': model_weights,
+    'metadata': {
+        'model_name': 'unet++',
+        'mode': 'multiclass',
+        'in_channels': 10,
+        'num_classes': 6,
+        'input_size': [224, 224],
+        'normalization': 'percentile_99',
+        'encoder_name': 'resnet34',
+        'pretrained': True,
+        'training_params': {
+            'epochs': 100,
+            'batch_size': 4,
+            'learning_rate': 0.001,
+            'best_val_loss': 0.1234,
+            'best_val_iou': 0.7890
+        },
+        'performance_metrics': {...}
+    }
+}
 ```
 
----
+### Prediction Outputs
 
-# Recommended Practices
+- **Segmentation map**: GeoTIFF with class labels
+- **Confidence map** (optional): GeoTIFF with prediction confidence
+- **Statistics report**: Console output with class distribution and confidence metrics
 
-- Consider data augmentation in cases of limited training samples.  
-- For large-scene inference, ensure sufficient overlap between patches to mitigate boundary artifacts.  
-- Adjust decision thresholds for binary segmentation according to sensitivity requirements.  
-- Reduce batch size or patch size if GPU memory constraints arise.  
-- Prefer GPU computation for both training and inference.
+## Examples
 
----
+### Example 1: Land Cover Classification (Multi-class)
+```bash
+# Extract patches from large scenes
+python Patch_extraction.py extract \
+    --image sentinel2_scene.tif \
+    --label landcover_labels.tif \
+    --grid grid_polygons.shp \
+    --output ./landcover_dataset \
+    --patch_size 256 \
+    --image_channels 10 \
+    --train_ratio 0.7 \
+    --val_ratio 0.15 \
+    --test_ratio 0.15
 
-![Example Prediction](figs/img1.jpg)
+# Train with cross-validation
+python main.py --mode multiclass \
+               --classes 6 \
+               --dataset_root ./landcover_dataset \
+               --model deeplabv3+ \
+               --encoder_name efficientnet-b4 \
+               --pretrained \
+               --val_strategy kfold \
+               --n_splits 5 \
+               --data_augmentation \
+               --use_class_weights \
+               --epochs 200 \
+               --save_dir ./landcover_models
 
-# Troubleshooting
+# Predict on new large scene
+python Predict_large_image.py \
+    --model ./landcover_models/model_final_model.pth \
+    --input new_sentinel2_scene.tif \
+    --output landcover_prediction.tif \
+    --save_confidence
+```
 
-### Dataset Not Detected  
-Verify that `.tif` files follow the expected directory convention.
+### Example 2: Water Body Detection (Binary)
+```bash
+# Train binary segmentation
+python main.py --mode binary \
+               --dataset_root ./water_dataset \
+               --model unet++ \
+               --encoder_name resnet34 \
+               --pretrained \
+               --in_channels 10 \
+               --data_augmentation \
+               --use_class_weights \
+               --epochs 150 \
+               --learning_rate 0.0005
 
-### Channel Mismatch  
-Ensure `--in_channels` corresponds to the actual number of spectral bands.
+# Predict with custom threshold
+python Predict_large_image.py \
+    --model ./water_models/model_final_model.pth \
+    --input sentinel2_water_scene.tif \
+    --output water_mask.tif \
+    --threshold 0.3 \
+    --patch_size 224 \
+    --overlap 64
+```
 
-### GPU Memory Exhaustion  
-Lower the batch size or inference patch size.
+## Best Practices
 
-### Border Artifacts  
-Increase the overlap value during large-scene prediction.
+### Data Preparation
+- Normalize images using the 99th percentile method (already implemented)
+- Ensure class balance or use `--use_class_weights` for imbalanced datasets
+- Use data augmentation (`--data_augmentation`) for small datasets
+- Validate spatial alignment between images and masks
 
----
+### Training Configuration
+- Start with pretrained encoders for faster convergence
+- Use cross-validation (`--val_strategy kfold`) for reliable performance estimation
+- Adjust batch size based on GPU memory (typically 4-16 for 224-512px patches)
+- Monitor multiple metrics: Loss, IoU, and F1-score
 
-# License
-This project is licensed under the MIT License.
+### Inference Settings
+- Set appropriate overlap (25-50% of patch size) to avoid border artifacts
+- Generate confidence maps (`--save_confidence`) for uncertainty analysis
+- Process large images in chunks if memory is limited
+- Verify geospatial alignment of output predictions
 
----
+### Performance Optimization
+- Use GPU acceleration for both training and inference
+- Adjust patch size based on GPU memory (256-512px recommended)
+- Enable mixed precision training for faster training (modify `model_training.py`)
+- Use data loaders with pinned memory for faster data transfer
 
-# Contact
-For inquiries, collaborations, or technical questions, please contact:  
-**adrien.leguillou@univ-brest.fr**
+## Troubleshooting
+
+### Common Issues
+
+#### 1. "No images found" error
+- **Cause**: Incorrect dataset structure or file extensions
+- **Solution**: Verify directory structure and ensure files have `.tif` or `.tiff` extensions
+
+#### 2. CUDA out of memory
+- **Cause**: Batch size or patch size too large
+- **Solution**: Reduce `--batch_size` or `--patch_size`
+
+#### 3. Poor prediction quality at patch borders
+- **Cause**: Insufficient overlap between patches
+- **Solution**: Increase `--overlap` parameter (recommended: 25-50% of patch size)
+
+#### 4. Model fails to load
+- **Cause**: Mismatch in model parameters or architecture
+- **Solution**: Ensure `--in_channels` and `--num_classes` match training configuration
+
+#### 5. Slow inference speed
+- **Cause**: Large patch size or CPU inference
+- **Solution**: Reduce patch size, use GPU (`--device cuda`), or enable tiling
+
+### Debug Mode
+
+For detailed debugging, add error tracebacks:
+```python
+# In model_training.py or Predict_large_image.py
+import traceback
+try:
+    # Your code here
+except Exception as e:
+    print(f"Error: {e}")
+    traceback.print_exc()
+```
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Contact
+
+For questions, collaborations, or technical support:
+
+**Adrien Leguillou**  
+Research Engineer at LETG 
+Email: adrien.leguillou@univ-brest.fr  
+
+
+## Acknowledgments
+
+This framework builds upon several open-source projects:
+- [Segmentation Models PyTorch](https://github.com/qubvel/segmentation_models.pytorch)
+- [PyTorch](https://pytorch.org/)
+- [Rasterio](https://rasterio.readthedocs.io/)
+- [GDAL](https://gdal.org/)
+
+Special thanks to the remote sensing community for datasets and methodologies that inspired this work.
