@@ -35,7 +35,7 @@ class LargeImagePredictorHybrid:
     Handles both binary and multi-class segmentation with robust preprocessing.
     """
     
-    def __init__(self, model_path, model_name=None, in_channels=None, 
+    def __init__(self, model_path, model_name=None, encoder_name=None, in_channels=None, 
                  num_classes=None, patch_size=512, overlap=128, 
                  device='cuda', threshold=0.5, normalization_percentile=99,
                  background_value=0, normalize_per_channel=True):
@@ -45,6 +45,7 @@ class LargeImagePredictorHybrid:
         Args:
             model_path: Path to .pth model file
             model_name: Model architecture name
+            encoder_name: Encoder backbone name (e.g., resnet34, resnet50, efficientnet-b0)
             in_channels: Number of input channels
             num_classes: Number of output classes
             patch_size: Size of square patches
@@ -57,6 +58,7 @@ class LargeImagePredictorHybrid:
         """
         self.model_path = model_path
         self.model_name = model_name
+        self.encoder_name = encoder_name
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.patch_size = patch_size
@@ -91,6 +93,7 @@ class LargeImagePredictorHybrid:
         
         print(f"\nFinal configuration:")
         print(f"  - Model: {self.model_name}")
+        print(f"  - Encoder: {self.encoder_name}")
         print(f"  - Input channels: {self.in_channels}")
         print(f"  - Number of classes: {self.num_classes}")
         print(f"  - Mode: {self.mode.upper()}")
@@ -119,7 +122,8 @@ class LargeImagePredictorHybrid:
         if isinstance(checkpoint, dict):
             if 'model_state_dict' in checkpoint:
                 model_state_dict = checkpoint['model_state_dict']
-                metadata = checkpoint.get('metadata', {})
+                # Support both 'metadata' (old format) and 'config' (model_training_v2 format)
+                metadata = checkpoint.get('config', checkpoint.get('metadata', {}))
                 print("✓ Detected format: training checkpoint")
             elif 'state_dict' in checkpoint:
                 model_state_dict = checkpoint['state_dict']
@@ -133,6 +137,7 @@ class LargeImagePredictorHybrid:
         
         # Extract metadata
         detected_model_name = metadata.get('model_name', None)
+        detected_encoder_name = metadata.get('encoder_name', None)
         detected_in_channels = metadata.get('in_channels', None)
         detected_num_classes = metadata.get('num_classes', None)
         
@@ -157,12 +162,18 @@ class LargeImagePredictorHybrid:
         
         print(f"\nDetected parameters:")
         print(f"  - Model name: {detected_model_name or 'Not detected'}")
+        print(f"  - Encoder name: {detected_encoder_name or 'Not detected'}")
         print(f"  - Input channels: {detected_in_channels or 'Not detected'}")
         print(f"  - Number of classes: {detected_num_classes or 'Not detected'}")
         
         # Set parameters (user args take precedence)
         if self.model_name is None:
             self.model_name = detected_model_name or 'unet'
+        
+        if self.encoder_name is None:
+            self.encoder_name = detected_encoder_name or 'resnet34'
+            if detected_encoder_name is None:
+                print(f"⚠ Encoder not detected, using default: {self.encoder_name}")
         
         if self.in_channels is None:
             self.in_channels = detected_in_channels or 10
@@ -176,12 +187,14 @@ class LargeImagePredictorHybrid:
         
         # Build model
         print(f"\nBuilding model: {self.model_name}")
+        print(f"  - Encoder: {self.encoder_name}")
         print(f"  - Input channels: {self.in_channels}")
         print(f"  - Output classes: {self.num_classes}")
         
         try:
             model = build_model(
                 name=self.model_name,
+                encoder_name=self.encoder_name,
                 in_channels=self.in_channels,
                 classes=self.num_classes
             )
@@ -195,6 +208,7 @@ class LargeImagePredictorHybrid:
                     print(f"  Trying with model name: {alt_name}")
                     model = build_model(
                         name=alt_name,
+                        encoder_name=self.encoder_name,
                         in_channels=self.in_channels,
                         classes=self.num_classes
                     )
@@ -716,11 +730,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Binary segmentation
+  # Binary segmentation with default encoder (resnet34)
   python predict_large_image.py --model model.pth --input image.tif --output prediction.tif
   
-  # Multi-class with 6 classes
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --num_classes 6
+  # Specify encoder (must match training encoder!)
+  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --encoder_name resnet50
+  
+  # Multi-class with 6 classes and EfficientNet encoder
+  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --num_classes 6 --encoder_name efficientnet-b4
   
   # Custom patch size and overlap
   python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --patch_size 256 --overlap 64
@@ -736,7 +753,17 @@ Examples:
     parser.add_argument('--output', required=True, help='Path for output mask')
     
     # Model parameters
-    parser.add_argument('--model_name', help='Model architecture name')
+    parser.add_argument('--model_name', help='Model architecture name (unet, deeplabv3+, fpn, etc.)')
+    parser.add_argument('--encoder_name', 
+                        help='''Encoder backbone name from SMP library. Popular choices:
+  ResNet: resnet18, resnet34, resnet50, resnet101, resnet152
+  EfficientNet: efficientnet-b0 to efficientnet-b7
+  ResNeXt: resnext50_32x4d, resnext101_32x8d
+  SE-ResNet: se_resnet50, se_resnet101, se_resnet152
+  DenseNet: densenet121, densenet169, densenet201
+  VGG: vgg11_bn, vgg13_bn, vgg16_bn, vgg19_bn
+  MobileNet: mobilenet_v2, timm-mobilenetv3_large_100
+  Full list: https://github.com/qubvel/segmentation_models.pytorch#encoders''')
     parser.add_argument('--in_channels', type=int, help='Number of input channels')
     parser.add_argument('--num_classes', type=int, help='Number of output classes')
     
@@ -772,6 +799,7 @@ Examples:
         predictor = LargeImagePredictorHybrid(
             model_path=args.model,
             model_name=args.model_name,
+            encoder_name=args.encoder_name,
             in_channels=args.in_channels,
             num_classes=args.num_classes,
             patch_size=args.patch_size,
