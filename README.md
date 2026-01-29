@@ -14,7 +14,7 @@ SemanticSeg4EO is a comprehensive framework for semantic segmentation of satelli
 - [Dataset Preparation](#dataset-preparation)
 - [Patch Extraction](#patch-extraction)
 - [Training System](#training-system)
-- [Advanced Training Features (V2)](#advanced-training-features-v2)
+- [Advanced Training Features](#advanced-training-features)
 - [Inference on Large Images](#inference-on-large-images)
 - [Architecture Support](#architecture-support)
 - [Output Format](#output-format)
@@ -84,13 +84,13 @@ Version 2 introduces significant enhancements for improved training performance 
 - Weighted blending to reduce border artifacts
 - Geospatial metadata preservation
 - Confidence map generation
-- Automatic encoder detection from checkpoints (V2)
+- Automatic encoder detection from checkpoints
 
 ### Data Preparation
 - Automatic patch extraction using shapefile grids
 - Train/validation/test splitting with reproducibility
 - Multi-channel support (including Sentinel-2 with 10+ bands)
-- **Batch mode** for processing multiple images (V2)
+- **Batch mode** for processing multiple images
 
 ## Installation
 
@@ -111,18 +111,29 @@ pip install -r requirements.txt
 
 ### requirements.txt
 ```text
+# Core Deep Learning
 torch>=1.10.0
 torchvision>=0.11.0
 segmentation-models-pytorch>=0.3.0
-rasterio>=1.2.0
-geopandas>=0.10.0
-tifffile>=2021.7.2
-numpy>=1.21.0
-matplotlib>=3.4.0
-scipy>=1.7.0
-scikit-learn>=0.24.0
-tqdm>=4.62.0
+
+# Geospatial
+rasterio>=1.3.0
+geopandas>=0.12.0
+
+# Image Processing
+tifffile>=2022.5.4
 opencv-python>=4.5.0
+
+# Scientific Computing
+numpy>=1.21.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+# Visualization
+matplotlib>=3.5.0
+
+# Utilities
+tqdm>=4.64.0
 ```
 
 ## Quick Start
@@ -146,25 +157,25 @@ dataset_root/
 │       └── labels/
 ```
 
-### 2. Train a Model (V2)
+### 2. Train a Model
 ```bash
 # Multi-class segmentation with Focal Loss (recommended for imbalanced data)
-python main_v2.py --mode multiclass --classes 5 --dataset_root /path/to/data \
+python main.py --mode multiclass --classes 5 --dataset_root /path/to/data \
     --model unet++ --loss_type focal --use_class_weights
 
 # With encoder freezing and warmup
-python main_v2.py --mode multiclass --classes 5 --dataset_root /path/to/data \
+python main.py --mode multiclass --classes 5 --dataset_root /path/to/data \
     --model unet++ --freeze_encoder --freeze_epochs 5 --warmup_epochs 2
 
 # Binary segmentation
-python main_v2.py --mode binary --dataset_root /path/to/data --model unet
+python main.py --mode binary --dataset_root /path/to/data --model unet
 ```
 
 ### 3. Predict on Large Image
 ```bash
-python Predict_large_image_v2.py --model trained_models/model_final.pth \
-                                 --input large_image.tif \
-                                 --output prediction.tif
+python Predict_large_image.py --model trained_models/model_final.pth \
+                              --input large_image.tif \
+                              --output prediction.tif
 ```
 
 ## Dataset Preparation
@@ -200,7 +211,7 @@ For large satellite scenes, use the patch extraction module to create training-r
 
 ### Single Image Extraction
 ```bash
-python Patch_extraction_v2.py single \
+python Patch_extraction.py single \
     --image /path/to/satellite_image.tif \
     --label /path/to/ground_truth.tif \
     --grid /path/to/grid_shapefile.shp \
@@ -212,10 +223,10 @@ python Patch_extraction_v2.py single \
     --test_ratio 0.10
 ```
 
-### Batch Mode (V2) - Multiple Images
+### Batch Mode - Multiple Images
 ```bash
 # Automatically find and process Image_1.tif/Label_1.tif, Image_2.tif/Label_2.tif, etc.
-python Patch_extraction_v2.py batch \
+python Patch_extraction.py batch \
     --data_dir /path/to/images_folder \
     --grid /path/to/grid.shp \
     --output /path/to/output \
@@ -231,12 +242,12 @@ python Patch_extraction_v2.py batch \
 
 ### Dataset Information
 ```bash
-python Patch_extraction_v2.py info --output /path/to/dataset
+python Patch_extraction.py info --output /path/to/dataset
 ```
 
 ### Visualization
 ```bash
-python Patch_extraction_v2.py visualize \
+python Patch_extraction.py visualize \
     --output /path/to/output_dataset \
     --split train \
     --sample_index 0
@@ -244,20 +255,20 @@ python Patch_extraction_v2.py visualize \
 
 ## Training System
 
-### Unified Training Interface (V2)
+### Unified Training Interface
 
-The system provides a single entry point (`main_v2.py`) for both segmentation modes with all new features:
+The system provides a single entry point (`main.py`) for both segmentation modes with all features:
 
 ```bash
-python main_v2.py --mode [binary|multiclass] [OPTIONS]
+python main.py --mode [binary|multiclass] [OPTIONS]
 ```
 
 ### Basic Training Examples
 
-#### Standard Training with New Features
+#### Standard Training with Advanced Features
 ```bash
 # Multi-class with Focal Loss and encoder freezing
-python main_v2.py --mode multiclass \
+python main.py --mode multiclass \
     --classes 5 \
     --dataset_root /path/to/data \
     --model unet++ \
@@ -272,7 +283,7 @@ python main_v2.py --mode multiclass \
 #### Cross-Validation Training
 ```bash
 # 5-fold cross-validation with per-class metrics
-python main_v2.py --mode multiclass \
+python main.py --mode multiclass \
     --classes 5 \
     --dataset_root /path/to/data \
     --model unet++ \
@@ -282,7 +293,7 @@ python main_v2.py --mode multiclass \
     --log_per_class
 ```
 
-## Advanced Training Features (V2)
+## Advanced Training Features
 
 ### Loss Functions
 
@@ -298,10 +309,10 @@ python main_v2.py --mode multiclass \
 
 ```bash
 # Using Focal Loss with custom parameters
-python main_v2.py --loss_type focal --focal_gamma 2.0 --focal_alpha 0.25
+python main.py --loss_type focal --focal_gamma 2.0 --focal_alpha 0.25
 
 # Using Tversky Loss (weight false negatives more)
-python main_v2.py --loss_type tversky --tversky_alpha 0.3 --tversky_beta 0.7
+python main.py --loss_type tversky --tversky_alpha 0.3 --tversky_beta 0.7
 ```
 
 ### Encoder Freezing
@@ -309,7 +320,7 @@ python main_v2.py --loss_type tversky --tversky_alpha 0.3 --tversky_beta 0.7
 Freeze the pretrained encoder to preserve learned features during initial training:
 
 ```bash
-python main_v2.py --freeze_encoder --freeze_epochs 5
+python main.py --freeze_encoder --freeze_epochs 5
 ```
 
 This is particularly useful when fine-tuning on small datasets or when the target domain is similar to ImageNet.
@@ -319,7 +330,7 @@ This is particularly useful when fine-tuning on small datasets or when the targe
 Gradually increase learning rate from a small value to the target:
 
 ```bash
-python main_v2.py --warmup_epochs 3 --warmup_lr 1e-6 --learning_rate 5e-4
+python main.py --warmup_epochs 3 --warmup_lr 1e-6 --learning_rate 5e-4
 ```
 
 ### Mixed Precision Training
@@ -327,7 +338,7 @@ python main_v2.py --warmup_epochs 3 --warmup_lr 1e-6 --learning_rate 5e-4
 Enable automatic mixed precision for faster training and reduced memory:
 
 ```bash
-python main_v2.py --use_amp
+python main.py --use_amp
 ```
 
 ### Per-Class Metrics
@@ -335,20 +346,20 @@ python main_v2.py --use_amp
 Enable detailed per-class IoU logging and visualization:
 
 ```bash
-python main_v2.py --log_per_class --class_names background water forest urban
+python main.py --log_per_class --class_names background water forest urban
 ```
 
 ### Learning Rate Schedulers
 
 ```bash
 # ReduceLROnPlateau (default)
-python main_v2.py --scheduler_type reduce_plateau
+python main.py --scheduler_type reduce_plateau
 
 # Cosine Annealing
-python main_v2.py --scheduler_type cosine
+python main.py --scheduler_type cosine
 
 # One-Cycle Policy
-python main_v2.py --scheduler_type one_cycle
+python main.py --scheduler_type one_cycle
 ```
 
 ### Available Training Options
@@ -384,26 +395,26 @@ trained_models/
 ├── model_best_iou.pth           # Best validation IoU checkpoint
 ├── model_final.pth              # Final model with complete config
 ├── model_training_plot.png      # Training visualization
-├── model_training_log.csv       # Complete metrics history (V2)
-├── model_per_class_iou.png      # Per-class IoU evolution (V2)
+├── model_training_log.csv       # Complete metrics history
+├── model_per_class_iou.png      # Per-class IoU evolution
 └── model_metrics.json           # Complete metrics in JSON format
 ```
 
 ## Inference on Large Images
 
-The `Predict_large_image_v2.py` script handles prediction on arbitrarily large satellite scenes with automatic encoder detection:
+The `Predict_large_image.py` script handles prediction on arbitrarily large satellite scenes with automatic encoder detection:
 
 ### Basic Prediction
 ```bash
-python Predict_large_image_v2.py --model /path/to/model.pth \
-                                 --input /path/to/large_image.tif \
-                                 --output /path/to/prediction.tif
+python Predict_large_image.py --model /path/to/model.pth \
+                              --input /path/to/large_image.tif \
+                              --output /path/to/prediction.tif
 ```
 
 ### Advanced Prediction Options
 ```bash
 # Multi-class with custom parameters
-python Predict_large_image_v2.py \
+python Predict_large_image.py \
     --model /path/to/model.pth \
     --input large_image.tif \
     --output prediction.tif \
@@ -439,7 +450,7 @@ The predictor uses weighted blending to eliminate border artifacts, automatic pa
 
 Run the following to see all available models:
 ```bash
-python -c "from model_training_v2 import get_available_models; print(get_available_models())"
+python -c "from model_training import get_available_models; print(get_available_models())"
 ```
 
 ### Model Categories
@@ -466,14 +477,14 @@ python -c "from model_training_v2 import get_available_models; print(get_availab
 
 ## Output Format
 
-### Model Checkpoints (V2)
+### Model Checkpoints
 
-Trained models are saved with comprehensive metadata including all V2 configuration:
+Trained models are saved with comprehensive metadata including all configuration:
 
 ```python
 {
     'model_state_dict': model_weights,
-    'config': {  # V2: Complete TrainingConfig
+    'config': {
         'model_name': 'unet++',
         'mode': 'multiclass',
         'in_channels': 10,
@@ -489,7 +500,7 @@ Trained models are saved with comprehensive metadata including all V2 configurat
     'performance_metrics': {
         'best_val_loss': 0.1234,
         'best_val_iou': 0.7890,
-        'per_class_iou': {...}  # V2: Per-class metrics
+        'per_class_iou': {...}
     }
 }
 ```
@@ -502,18 +513,18 @@ Trained models are saved with comprehensive metadata including all V2 configurat
 
 ## Examples
 
-### Example 1: Land Cover Classification (Multi-class) with V2 Features
+### Example 1: Land Cover Classification (Multi-class)
 ```bash
 # Extract patches from large scenes (batch mode)
-python Patch_extraction_v2.py batch \
+python Patch_extraction.py batch \
     --data_dir ./raw_data \
     --grid grid_polygons.shp \
     --output ./landcover_dataset \
     --patch_size 256 \
     --image_channels 10
 
-# Train with all V2 features
-python main_v2.py --mode multiclass \
+# Train with advanced features
+python main.py --mode multiclass \
     --classes 6 \
     --dataset_root ./landcover_dataset \
     --model deeplabv3+ \
@@ -528,7 +539,7 @@ python main_v2.py --mode multiclass \
     --epochs 200
 
 # Predict on new scene
-python Predict_large_image_v2.py \
+python Predict_large_image.py \
     --model ./trained_models/model_final.pth \
     --input new_sentinel2_scene.tif \
     --output landcover_prediction.tif \
@@ -538,7 +549,7 @@ python Predict_large_image_v2.py \
 ### Example 2: Water Body Detection (Binary)
 ```bash
 # Train binary segmentation with Dice loss
-python main_v2.py --mode binary \
+python main.py --mode binary \
     --dataset_root ./water_dataset \
     --model unet++ \
     --encoder_name resnet34 \
@@ -549,7 +560,7 @@ python main_v2.py --mode binary \
     --learning_rate 0.0005
 
 # Predict with custom threshold
-python Predict_large_image_v2.py \
+python Predict_large_image.py \
     --model ./water_models/model_final.pth \
     --input sentinel2_water_scene.tif \
     --output water_mask.tif \
@@ -558,8 +569,8 @@ python Predict_large_image_v2.py \
 
 ### Example 3: Handling Severe Class Imbalance
 ```bash
-# Use Focal-Dice loss with high gamma and Tversky for FN penalty
-python main_v2.py --mode multiclass \
+# Use Focal-Dice loss with high gamma
+python main.py --mode multiclass \
     --classes 5 \
     --dataset_root ./imbalanced_data \
     --model unet++ \
@@ -577,7 +588,7 @@ python main_v2.py --mode multiclass \
 - Use data augmentation (`--data_augmentation`) for small datasets
 - Validate spatial alignment between images and masks
 
-### Training Configuration (V2 Recommendations)
+### Training Configuration
 - **Start with pretrained encoders** and use `--freeze_encoder` for better transfer learning
 - **Use Focal Loss** (`--loss_type focal` or `--loss_type focal_dice`) for imbalanced datasets
 - **Enable warmup** (`--warmup_epochs 2-5`) for more stable training
@@ -615,13 +626,13 @@ python main_v2.py --mode multiclass \
 
 #### 4. Model fails to load
 - **Cause**: Mismatch in model parameters or architecture
-- **Solution**: Ensure `--in_channels`, `--num_classes`, and `--encoder_name` match training configuration (V2 auto-detects these from checkpoint)
+- **Solution**: Ensure `--in_channels`, `--num_classes`, and `--encoder_name` match training configuration (auto-detected from checkpoint)
 
 #### 5. Slow inference speed
 - **Cause**: Large patch size or CPU inference
 - **Solution**: Reduce patch size, use GPU (`--device cuda`), or enable tiling
 
-#### 6. Class imbalance issues (V2)
+#### 6. Class imbalance issues
 - **Cause**: Dominant background class
 - **Solution**: Use `--loss_type focal_dice`, increase `--focal_gamma`, enable `--use_class_weights`
 
@@ -629,7 +640,6 @@ python main_v2.py --mode multiclass \
 
 For detailed debugging, add error tracebacks:
 ```python
-# In model_training_v2.py or Predict_large_image_v2.py
 import traceback
 try:
     # Your code here
@@ -658,5 +668,8 @@ This framework builds upon several open-source projects:
 - [PyTorch](https://pytorch.org/)
 - [Rasterio](https://rasterio.readthedocs.io/)
 - [GDAL](https://gdal.org/)
+
+Special thanks to the remote sensing community for datasets and methodologies that inspired this work.
+
 
 Special thanks to the remote sensing community for datasets and methodologies that inspired this work.
