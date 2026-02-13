@@ -1,60 +1,457 @@
-# predict_large_image_hybrid.py - VERSION CORRIGÉE ET AMÉLIORÉE
-
+#!/usr/bin/env python3
 """
-Universal predictor for large images with seamless segmentation.
-Handles both binary and multi-class segmentation with robust preprocessing.
+PREDICT MODERN V3 - Prédicteur d'images satellite/drone grand format
+=====================================================================
+Compatible avec les modèles entraînés via train_modern_architectures_v3_kfold.py
+
+Architectures supportées:
+  - SMP: unet, unet++, deeplabv3+, deeplabv3, manet, fpn, pan, pspnet, linknet
+  - SegFormer: segformer-b0 à segformer-b5
+  - UNetFormer, HRNet (w18/w32/w48), Swin-UNet
+
+Fonctionnalités:
+  - Fenêtre glissante avec chevauchement (overlap)
+  - Pondération gaussienne pour fusion sans coutures
+  - Normalisation identique à l'entraînement (percentile 99 global)
+  - Support binaire (Sigmoid) et multiclasse (Softmax)
+  - Sortie GeoTIFF géoréférencée
+  - Batch inference GPU
+  - Carte de confiance optionnelle
+
+Author: predict_modern_v3
 """
 
-import torch
-import numpy as np
-import rasterio
-from rasterio.windows import Window
 import os
-import tempfile
-from pathlib import Path
-from tqdm import tqdm
+import sys
 import math
 import argparse
-import sys
+import tempfile
 import warnings
+import numpy as np
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import rasterio
+from rasterio.windows import Window
+
+from tqdm import tqdm
+
 warnings.filterwarnings('ignore')
 
-# Try to import model building function
-try:
-    from model_training import build_model_for_prediction as build_model
-    print("✓ Using model_training for model building")
-except ImportError as e:
-    print(f"✗ Error importing from model_training: {e}")
-    print("Please ensure model_training.py is in the same directory or in PYTHONPATH")
-    sys.exit(1)
+
+# ============================================================================
+# VÉRIFICATION DÉPENDANCES
+# ============================================================================
+
+def check_dependencies():
+    """Vérifie les dépendances disponibles"""
+    deps = {}
+    try:
+        import segmentation_models_pytorch as smp
+        deps['smp'] = True
+        deps['smp_version'] = smp.__version__
+    except ImportError:
+        deps['smp'] = False
+    try:
+        from transformers import SegformerForSemanticSegmentation
+        deps['transformers'] = True
+    except ImportError:
+        deps['transformers'] = False
+    try:
+        import timm
+        deps['timm'] = True
+    except ImportError:
+        deps['timm'] = False
+    return deps
+
+DEPS = check_dependencies()
 
 
-class LargeImagePredictorHybrid:
-    """
-    Universal predictor for large images with seamless reconstruction.
-    Handles both binary and multi-class segmentation with robust preprocessing.
-    """
-    
-    def __init__(self, model_path, model_name=None, encoder_name=None, in_channels=None, 
-                 num_classes=None, patch_size=512, overlap=128, 
-                 device='cuda', threshold=0.5, normalization_percentile=99,
-                 background_value=0, normalize_per_channel=True):
+# ============================================================================
+# ARCHITECTURES MODERNES (copie exacte du train_modern_architectures_v3)
+# ============================================================================
+
+class SegFormerWrapper(nn.Module):
+    """SegFormer B0-B5 avec dropout configurable"""
+
+    VARIANTS = {
+        'segformer-b0': 'nvidia/segformer-b0-finetuned-ade-512-512',
+        'segformer-b1': 'nvidia/segformer-b1-finetuned-ade-512-512',
+        'segformer-b2': 'nvidia/segformer-b2-finetuned-ade-512-512',
+        'segformer-b3': 'nvidia/segformer-b3-finetuned-ade-512-512',
+        'segformer-b4': 'nvidia/segformer-b4-finetuned-ade-512-512',
+        'segformer-b5': 'nvidia/segformer-b5-finetuned-ade-512-512',
+    }
+
+    # Configs architecturales pour chaque variant (pour prédiction sans internet)
+    VARIANT_CONFIGS = {
+        'segformer-b0': dict(depths=[2, 2, 2, 2], hidden_sizes=[32, 64, 160, 256],
+                             decoder_hidden_size=256, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+        'segformer-b1': dict(depths=[2, 2, 2, 2], hidden_sizes=[64, 128, 320, 512],
+                             decoder_hidden_size=256, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+        'segformer-b2': dict(depths=[3, 4, 6, 3], hidden_sizes=[64, 128, 320, 512],
+                             decoder_hidden_size=768, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+        'segformer-b3': dict(depths=[3, 4, 18, 3], hidden_sizes=[64, 128, 320, 512],
+                             decoder_hidden_size=768, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+        'segformer-b4': dict(depths=[3, 8, 27, 3], hidden_sizes=[64, 128, 320, 512],
+                             decoder_hidden_size=768, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+        'segformer-b5': dict(depths=[3, 6, 40, 3], hidden_sizes=[64, 128, 320, 512],
+                             decoder_hidden_size=768, num_attention_heads=[1, 2, 5, 8],
+                             mlp_ratios=[4, 4, 4, 4], sr_ratios=[8, 4, 2, 1]),
+    }
+
+    def __init__(self, variant: str, num_classes: int, in_channels: int,
+                 pretrained: bool = True, dropout_rate: float = 0.3):
+        super().__init__()
+        if not DEPS.get('transformers'):
+            raise ImportError("pip install transformers")
+        from transformers import SegformerForSemanticSegmentation, SegformerConfig
+
+        self.num_classes = num_classes
+        self.in_channels = in_channels
+
+        if pretrained and variant in self.VARIANTS:
+            # Entraînement : charger poids pré-entraînés + fine-tune
+            self.model = SegformerForSemanticSegmentation.from_pretrained(
+                self.VARIANTS[variant],
+                num_labels=num_classes,
+                ignore_mismatched_sizes=True,
+                hidden_dropout_prob=dropout_rate,
+                attention_probs_dropout_prob=dropout_rate
+            )
+        elif variant in self.VARIANTS:
+            # Prédiction (pretrained=False) : construire la bonne architecture
+            # Méthode 1 : charger la config depuis HuggingFace (cache local si dispo)
+            config = None
+            try:
+                config = SegformerConfig.from_pretrained(
+                    self.VARIANTS[variant],
+                    num_labels=num_classes,
+                    num_channels=in_channels,
+                    hidden_dropout_prob=dropout_rate,
+                    attention_probs_dropout_prob=dropout_rate
+                )
+                print(f"    ✓ Config SegFormer '{variant}' chargée depuis cache/HuggingFace")
+            except Exception:
+                pass
+
+            # Méthode 2 : config hardcodée (fallback offline)
+            if config is None and variant in self.VARIANT_CONFIGS:
+                variant_params = self.VARIANT_CONFIGS[variant]
+                config = SegformerConfig(
+                    num_labels=num_classes,
+                    num_channels=in_channels,
+                    hidden_dropout_prob=dropout_rate,
+                    attention_probs_dropout_prob=dropout_rate,
+                    **variant_params
+                )
+                print(f"    ✓ Config SegFormer '{variant}' chargée depuis table locale")
+
+            if config is None:
+                raise ValueError(f"Impossible de charger la config pour '{variant}'")
+
+            self.model = SegformerForSemanticSegmentation(config)
+        else:
+            # Fallback : config par défaut (B0)
+            config = SegformerConfig(
+                num_labels=num_classes,
+                num_channels=in_channels,
+                hidden_dropout_prob=dropout_rate,
+                attention_probs_dropout_prob=dropout_rate
+            )
+            self.model = SegformerForSemanticSegmentation(config)
+
+        if in_channels != 3 and pretrained:
+            self._adapt_input_channels(in_channels)
+
+    def _adapt_input_channels(self, in_channels: int):
+        old_conv = self.model.segformer.encoder.patch_embeddings[0].proj
+        new_conv = nn.Conv2d(in_channels, old_conv.out_channels,
+                             kernel_size=old_conv.kernel_size,
+                             stride=old_conv.stride, padding=old_conv.padding)
+        with torch.no_grad():
+            if in_channels > 3:
+                new_conv.weight[:, :3] = old_conv.weight
+                for i in range(3, in_channels):
+                    new_conv.weight[:, i] = old_conv.weight[:, i % 3]
+            else:
+                new_conv.weight = nn.Parameter(old_conv.weight[:, :in_channels])
+            if old_conv.bias is not None:
+                new_conv.bias = old_conv.bias
+        self.model.segformer.encoder.patch_embeddings[0].proj = new_conv
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        outputs = self.model(pixel_values=x)
+        return F.interpolate(outputs.logits, size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+
+class UNetFormer(nn.Module):
+    """UNetFormer avec dropout configurable"""
+
+    def __init__(self, num_classes: int, in_channels: int, encoder_name: str = 'resnet18',
+                 pretrained: bool = True, dropout_rate: float = 0.3):
+        super().__init__()
+        self.num_classes = num_classes
+        self.in_channels = in_channels
+        self.dropout_rate = dropout_rate
+
+        if DEPS.get('timm'):
+            import timm
+            self.encoder = timm.create_model(encoder_name, pretrained=pretrained,
+                                             features_only=True, in_chans=in_channels)
+            self.encoder_channels = self.encoder.feature_info.channels()
+        elif DEPS.get('smp'):
+            import segmentation_models_pytorch as smp
+            aux = smp.Unet(encoder_name=encoder_name, in_channels=in_channels, classes=num_classes,
+                           encoder_weights='imagenet' if pretrained else None)
+            self.encoder = aux.encoder
+            self.encoder_channels = list(aux.encoder.out_channels[1:])
+        else:
+            raise ImportError("pip install timm or segmentation_models_pytorch")
+
+        self.decoder = self._build_decoder()
+        self.final_conv = nn.Conv2d(64, num_classes, 1)
+
+    def _build_decoder(self):
+        decoder_channels = [256, 128, 64, 64]
+        layers = nn.ModuleList()
+        in_ch = self.encoder_channels[-1]
+        for i, out_ch in enumerate(decoder_channels):
+            skip_ch = self.encoder_channels[-(i + 2)] if i < len(self.encoder_channels) - 1 else 0
+            layers.append(nn.Sequential(
+                nn.Conv2d(in_ch + skip_ch, out_ch, 3, padding=1),
+                nn.BatchNorm2d(out_ch),
+                nn.GELU(),
+                nn.Dropout2d(p=self.dropout_rate),
+                nn.Conv2d(out_ch, out_ch, 3, padding=1),
+                nn.BatchNorm2d(out_ch),
+                nn.GELU(),
+            ))
+            in_ch = out_ch
+        return layers
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(x)
+        if isinstance(features, dict):
+            features = list(features.values())
+        out = features[-1]
+        for i, layer in enumerate(self.decoder):
+            out = F.interpolate(out, scale_factor=2, mode='bilinear', align_corners=False)
+            if i < len(features) - 1:
+                skip = features[-(i + 2)]
+                if skip.shape[-2:] != out.shape[-2:]:
+                    skip = F.interpolate(skip, size=out.shape[-2:], mode='bilinear')
+                out = torch.cat([out, skip], dim=1)
+            out = layer(out)
+        out = self.final_conv(out)
+        return F.interpolate(out, size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+
+class HRNetSegmentation(nn.Module):
+    """HRNet avec dropout configurable"""
+
+    def __init__(self, variant: str, num_classes: int, in_channels: int,
+                 pretrained: bool = True, dropout_rate: float = 0.3):
+        super().__init__()
+        if not DEPS.get('timm'):
+            raise ImportError("pip install timm")
+        import timm
+        self.backbone = timm.create_model(variant, pretrained=pretrained,
+                                          features_only=True, in_chans=in_channels)
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, 256, 256)
+            features = self.backbone(dummy)
+            total_channels = sum(f.shape[1] for f in features)
+        self.head = nn.Sequential(
+            nn.Conv2d(total_channels, 256, 1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(p=dropout_rate),
+            nn.Conv2d(256, num_classes, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.backbone(x)
+        target_size = features[0].shape[-2:]
+        fused = []
+        for f in features:
+            if f.shape[-2:] != target_size:
+                f = F.interpolate(f, size=target_size, mode='bilinear', align_corners=False)
+            fused.append(f)
+        out = torch.cat(fused, dim=1)
+        out = self.head(out)
+        return F.interpolate(out, size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+
+class SwinUNet(nn.Module):
+    """Swin-UNet avec dropout configurable"""
+
+    def __init__(self, num_classes: int, in_channels: int, pretrained: bool = True,
+                 dropout_rate: float = 0.3):
+        super().__init__()
+        if not DEPS.get('timm'):
+            raise ImportError("pip install timm")
+        import timm
+        self.encoder = timm.create_model('swin_tiny_patch4_window7_224', pretrained=pretrained,
+                                         features_only=True, in_chans=in_channels)
+        encoder_channels = self.encoder.feature_info.channels()
+        self.up4 = nn.ConvTranspose2d(encoder_channels[-1], 256, 2, stride=2)
+        self.conv4 = self._conv_block(256 + encoder_channels[-2], 256, dropout_rate)
+        self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.conv3 = self._conv_block(128 + encoder_channels[-3], 128, dropout_rate)
+        self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.conv2 = self._conv_block(64 + encoder_channels[-4], 64, dropout_rate)
+        self.final = nn.Sequential(nn.ConvTranspose2d(64, 32, 4, stride=4), nn.Conv2d(32, num_classes, 1))
+
+    def _conv_block(self, in_ch, out_ch, dropout_rate):
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.GELU(),
+            nn.Dropout2d(p=dropout_rate),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.GELU()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(x)
+        d4 = self.up4(features[-1])
+        d4 = torch.cat([d4, F.interpolate(features[-2], size=d4.shape[-2:], mode='bilinear')], dim=1)
+        d4 = self.conv4(d4)
+        d3 = self.up3(d4)
+        d3 = torch.cat([d3, F.interpolate(features[-3], size=d3.shape[-2:], mode='bilinear')], dim=1)
+        d3 = self.conv3(d3)
+        d2 = self.up2(d3)
+        d2 = torch.cat([d2, F.interpolate(features[-4], size=d2.shape[-2:], mode='bilinear')], dim=1)
+        d2 = self.conv2(d2)
+        return F.interpolate(self.final(d2), size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+
+# ============================================================================
+# MODEL FACTORY (parité exacte avec train_modern_architectures_v3_kfold.py)
+# ============================================================================
+
+class ModelFactory:
+    """Factory pour instancier tous les modèles supportés par le système v3"""
+
+    MODERN_MODELS = {
+        'segformer-b0': ('segformer', 'b0'), 'segformer-b1': ('segformer', 'b1'),
+        'segformer-b2': ('segformer', 'b2'), 'segformer-b3': ('segformer', 'b3'),
+        'segformer-b4': ('segformer', 'b4'), 'segformer-b5': ('segformer', 'b5'),
+        'unetformer': ('unetformer', None),
+        'hrnet-w18': ('hrnet', 'hrnet_w18'), 'hrnet-w32': ('hrnet', 'hrnet_w32'),
+        'hrnet-w48': ('hrnet', 'hrnet_w48'),
+        'swin-unet': ('swin-unet', None),
+    }
+
+    SMP_MODELS = ['unet', 'unet++', 'deeplabv3+', 'deeplabv3', 'manet', 'fpn', 'pan', 'pspnet', 'linknet']
+
+    @classmethod
+    def list_models(cls):
+        models = list(cls.MODERN_MODELS.keys())
+        if DEPS.get('smp'):
+            models.extend(cls.SMP_MODELS)
+        return models
+
+    @classmethod
+    def build_model(cls, model_name: str, encoder_name: str = 'resnet34',
+                    in_channels: int = 4, num_classes: int = 2,
+                    mode: str = 'multiclass', pretrained: bool = False,
+                    dropout_rate: float = 0.3) -> nn.Module:
         """
-        Initialize the hybrid predictor
-        
+        Construit un modèle de segmentation.
+        Parité exacte avec ModelFactory.create() du script d'entraînement.
+
         Args:
-            model_path: Path to .pth model file
-            model_name: Model architecture name
-            encoder_name: Encoder backbone name (e.g., resnet34, resnet50, efficientnet-b0)
-            in_channels: Number of input channels
-            num_classes: Number of output classes
-            patch_size: Size of square patches
-            overlap: Overlap between patches (in pixels)
-            device: Device for inference
-            threshold: Threshold for binary segmentation
-            normalization_percentile: Percentile for normalization
-            background_value: Value for background class
-            normalize_per_channel: Whether to normalize each channel separately
+            model_name: Nom de l'architecture (ex: 'unet', 'segformer-b2', etc.)
+            encoder_name: Backbone encoder (pour SMP et UNetFormer)
+            in_channels: Nombre de canaux d'entrée
+            num_classes: Nombre de classes total
+            mode: 'binary' ou 'multiclass'
+            pretrained: Charger les poids pré-entraînés (False pour prédiction)
+            dropout_rate: Taux de dropout
+        """
+        name = model_name.lower()
+        # En binary, le modèle a 1 sortie ; en multiclass, num_classes sorties
+        actual_classes = 1 if mode == 'binary' else num_classes
+
+        # --- Architectures modernes (SegFormer, UNetFormer, HRNet, Swin-UNet) ---
+        if name in cls.MODERN_MODELS:
+            model_type, variant = cls.MODERN_MODELS[name]
+
+            if model_type == 'segformer':
+                return SegFormerWrapper(name, actual_classes, in_channels, pretrained, dropout_rate)
+            elif model_type == 'unetformer':
+                return UNetFormer(actual_classes, in_channels, encoder_name, pretrained, dropout_rate)
+            elif model_type == 'hrnet':
+                return HRNetSegmentation(variant, actual_classes, in_channels, pretrained, dropout_rate)
+            elif model_type == 'swin-unet':
+                return SwinUNet(actual_classes, in_channels, pretrained, dropout_rate)
+
+        # --- Modèles SMP ---
+        elif DEPS.get('smp'):
+            import segmentation_models_pytorch as smp
+            smp_map = {
+                'unet': smp.Unet, 'unet++': smp.UnetPlusPlus,
+                'deeplabv3+': smp.DeepLabV3Plus, 'deeplabv3': smp.DeepLabV3,
+                'manet': smp.MAnet, 'fpn': smp.FPN,
+                'pan': smp.PAN, 'pspnet': smp.PSPNet, 'linknet': smp.Linknet,
+            }
+            # Normalisation du nom pour matching
+            name_clean = name.replace('-', '').replace('_', '')
+            for key, model_cls in smp_map.items():
+                key_clean = key.replace('+', 'plus').replace('-', '').replace('_', '')
+                # Aussi tester avec le '+' tel quel
+                if name_clean == key_clean or name == key:
+                    return model_cls(
+                        encoder_name=encoder_name,
+                        in_channels=in_channels,
+                        classes=actual_classes,
+                        encoder_weights='imagenet' if pretrained else None,
+                        activation=None
+                    )
+
+        raise ValueError(
+            f"Modèle inconnu: '{model_name}'. Disponibles: {cls.list_models()}"
+        )
+
+
+# ============================================================================
+# PRÉDICTEUR D'IMAGES GRAND FORMAT
+# ============================================================================
+
+class LargeImagePredictor:
+    """
+    Prédicteur d'images satellite/drone grand format avec reconstruction seamless.
+
+    Compatible avec les modèles entraînés via train_modern_architectures_v3_kfold.py.
+    Utilise une fenêtre glissante avec pondération gaussienne pour éliminer
+    les artefacts de bordure.
+    """
+
+    def __init__(self, model_path: str, model_name: str, encoder_name: str = 'resnet34',
+                 in_channels: int = 4, num_classes: int = 2,
+                 patch_size: int = 224, overlap: int = 112,
+                 batch_size: int = 4, threshold: float = 0.5,
+                 device: str = 'cuda', dropout_rate: float = 0.3):
+        """
+        Args:
+            model_path: Chemin vers le fichier .pth
+            model_name: Architecture (unet, segformer-b2, deeplabv3+, etc.)
+            encoder_name: Backbone encoder (resnet34, efficientnet-b3, etc.)
+            in_channels: Nombre de canaux d'entrée
+            num_classes: Nombre de classes (1 = binary, >1 = multiclass)
+            patch_size: Taille des patches (doit correspondre à l'entraînement)
+            overlap: Chevauchement entre patches en pixels
+            batch_size: Taille de batch pour l'inférence GPU
+            threshold: Seuil pour la segmentation binaire
+            device: 'cuda' ou 'cpu'
+            dropout_rate: Taux de dropout (doit correspondre à l'entraînement)
         """
         self.model_path = model_path
         self.model_name = model_name
@@ -63,544 +460,488 @@ class LargeImagePredictorHybrid:
         self.num_classes = num_classes
         self.patch_size = patch_size
         self.overlap = overlap
+        self.batch_size = batch_size
         self.threshold = threshold
-        self.normalization_percentile = normalization_percentile
-        self.background_value = background_value
-        self.normalize_per_channel = normalize_per_channel
+        self.dropout_rate = dropout_rate
         self.device = torch.device(device if torch.cuda.is_available() and device == 'cuda' else 'cpu')
-        
-        print(f"\n{'='*70}")
-        print("UNIVERSAL LARGE IMAGE PREDICTOR INITIALIZATION")
-        print(f"{'='*70}")
-        print(f"  Model path: {model_path}")
-        print(f"  Device: {self.device}")
-        print(f"  Patch size: {patch_size}")
-        print(f"  Overlap: {overlap}")
-        print(f"  Normalization: {normalization_percentile}th percentile")
-        print(f"  Per-channel normalization: {normalize_per_channel}")
-        print(f"  Background value: {background_value}")
-        
-        # Validate parameters
-        if overlap < patch_size // 4:
-            print(f"\n⚠ Warning: Overlap ({overlap}) is less than patch_size/4 ({patch_size//4})")
-            print("  Consider increasing overlap for better reconstruction")
-        
-        # Load the model
+
+        # Déterminer le mode
+        self.mode = 'binary' if num_classes == 1 else 'multiclass'
+
+        self._print_config()
+
+        # Charger le modèle
         self.model = self._load_model()
-        
-        # Determine mode based on num_classes
-        self.mode = 'binary' if self.num_classes == 1 else 'multiclass'
-        
-        print(f"\nFinal configuration:")
-        print(f"  - Model: {self.model_name}")
-        print(f"  - Encoder: {self.encoder_name}")
-        print(f"  - Input channels: {self.in_channels}")
-        print(f"  - Number of classes: {self.num_classes}")
-        print(f"  - Mode: {self.mode.upper()}")
+
+        # Pré-calculer la fenêtre de pondération gaussienne
+        self.gaussian_window = self._create_gaussian_window(patch_size, patch_size)
+
+    def _print_config(self):
+        """Affiche la configuration du prédicteur"""
+        print(f"\n{'=' * 70}")
+        print("PREDICT MODERN V3 - INITIALISATION")
+        print(f"{'=' * 70}")
+        print(f"  Modèle         : {self.model_name}")
+        print(f"  Encoder         : {self.encoder_name}")
+        print(f"  Poids           : {self.model_path}")
+        print(f"  Device          : {self.device}")
+        print(f"  Canaux entrée   : {self.in_channels}")
+        print(f"  Classes         : {self.num_classes}")
+        print(f"  Mode            : {self.mode.upper()}")
+        print(f"  Patch size      : {self.patch_size}")
+        print(f"  Overlap         : {self.overlap}")
+        print(f"  Batch size      : {self.batch_size}")
         if self.mode == 'binary':
-            print(f"  - Threshold: {self.threshold}")
-        
-        # Create temporary directory
-        self.temp_dir = tempfile.mkdtemp(prefix="predictor_")
-        print(f"  - Temporary directory: {self.temp_dir}")
-    
-    def _load_model(self):
-        """Load model with automatic parameter detection"""
-        print(f"\nLoading model from: {self.model_path}")
-        
+            print(f"  Seuil           : {self.threshold}")
+        print(f"  Dropout rate    : {self.dropout_rate}")
+
+    # ------------------------------------------------------------------
+    # CHARGEMENT DU MODÈLE
+    # ------------------------------------------------------------------
+
+    def _load_model(self) -> nn.Module:
+        """
+        Charge le modèle avec détection automatique du format de checkpoint.
+        Gère les formats:
+          - state_dict pur (K-Fold)
+          - {'model_state_dict': ..., 'config': ...} (standard v3)
+          - {'state_dict': ...}
+        """
+        print(f"\nChargement du modèle depuis: {self.model_path}")
+
         if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Model file not found: {self.model_path}")
-        
-        # Load checkpoint
+            raise FileNotFoundError(f"Fichier modèle introuvable: {self.model_path}")
+
         checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=False)
-        
-        # Try to extract model parameters
-        model_state_dict = None
-        metadata = {}
-        
-        # Handle different checkpoint formats
+
+        # --- Extraire le state_dict et la config ---
+        state_dict = None
+        config = {}
+
         if isinstance(checkpoint, dict):
             if 'model_state_dict' in checkpoint:
-                model_state_dict = checkpoint['model_state_dict']
-                # Support both 'metadata' (old format) and 'config' (model_training_v2 format)
-                metadata = checkpoint.get('config', checkpoint.get('metadata', {}))
-                print("✓ Detected format: training checkpoint")
+                state_dict = checkpoint['model_state_dict']
+                config = checkpoint.get('config', {})
+                print("  ✓ Format détecté: checkpoint complet v3 (model_state_dict + config)")
             elif 'state_dict' in checkpoint:
-                model_state_dict = checkpoint['state_dict']
-                print("✓ Detected format: state_dict only")
+                state_dict = checkpoint['state_dict']
+                config = checkpoint.get('config', checkpoint.get('metadata', {}))
+                print("  ✓ Format détecté: state_dict wrapper")
             else:
-                # Try direct loading
-                model_state_dict = checkpoint
-                print("⚠ Unknown dict format - attempting direct loading")
+                # Vérifier si c'est un state_dict pur (les clés ressemblent à des paramètres)
+                sample_keys = list(checkpoint.keys())[:5]
+                looks_like_state_dict = any(
+                    '.' in k and any(kw in k for kw in ['weight', 'bias', 'running_mean', 'num_batches'])
+                    for k in sample_keys
+                )
+                if looks_like_state_dict:
+                    state_dict = checkpoint
+                    print("  ✓ Format détecté: state_dict pur (K-Fold)")
+                else:
+                    state_dict = checkpoint
+                    print("  ⚠ Format inconnu - tentative de chargement direct")
         else:
-            raise ValueError(f"Unexpected checkpoint type: {type(checkpoint)}")
-        
-        # Extract metadata
-        detected_model_name = metadata.get('model_name', None)
-        detected_encoder_name = metadata.get('encoder_name', None)
-        detected_in_channels = metadata.get('in_channels', None)
-        detected_num_classes = metadata.get('num_classes', None)
-        
-        # Try to infer from state_dict keys if not in metadata
-        if detected_in_channels is None:
-            # Look for conv1 weight shape
-            for key in model_state_dict.keys():
-                if 'conv1.weight' in key or 'conv1.conv.weight' in key:
-                    weight_shape = model_state_dict[key].shape
-                    if len(weight_shape) == 4:
-                        detected_in_channels = weight_shape[1]
-                        break
-        
-        if detected_num_classes is None:
-            # Look for final layer weight shape
-            for key in model_state_dict.keys():
-                if any(x in key for x in ['conv_cls.weight', 'classifier.weight', 'last_layer.weight']):
-                    weight_shape = model_state_dict[key].shape
-                    if len(weight_shape) == 4:
-                        detected_num_classes = weight_shape[0]
-                        break
-        
-        print(f"\nDetected parameters:")
-        print(f"  - Model name: {detected_model_name or 'Not detected'}")
-        print(f"  - Encoder name: {detected_encoder_name or 'Not detected'}")
-        print(f"  - Input channels: {detected_in_channels or 'Not detected'}")
-        print(f"  - Number of classes: {detected_num_classes or 'Not detected'}")
-        
-        # Set parameters (user args take precedence)
-        if self.model_name is None:
-            self.model_name = detected_model_name or 'unet'
-        
-        if self.encoder_name is None:
-            self.encoder_name = detected_encoder_name or 'resnet34'
-            if detected_encoder_name is None:
-                print(f"⚠ Encoder not detected, using default: {self.encoder_name}")
-        
-        if self.in_channels is None:
-            self.in_channels = detected_in_channels or 10
-            if detected_in_channels is None:
-                print(f"⚠ Input channels not detected, using default: {self.in_channels}")
-        
-        if self.num_classes is None:
-            self.num_classes = detected_num_classes or 1
-            if detected_num_classes is None:
-                print(f"⚠ Number of classes not detected, assuming binary: {self.num_classes}")
-        
-        # Build model
-        print(f"\nBuilding model: {self.model_name}")
-        print(f"  - Encoder: {self.encoder_name}")
-        print(f"  - Input channels: {self.in_channels}")
-        print(f"  - Output classes: {self.num_classes}")
-        
+            raise ValueError(f"Type de checkpoint inattendu: {type(checkpoint)}")
+
+        # --- Mise à jour des paramètres depuis la config sauvegardée ---
+        if config:
+            self._update_params_from_config(config)
+
+        # --- Construire le modèle ---
+        print(f"\nConstruction de l'architecture: {self.model_name}")
+        model = ModelFactory.build_model(
+            model_name=self.model_name,
+            encoder_name=self.encoder_name,
+            in_channels=self.in_channels,
+            num_classes=self.num_classes,
+            mode=self.mode,
+            pretrained=False,
+            dropout_rate=self.dropout_rate
+        )
+
+        # --- Charger les poids ---
+        # Retirer le préfixe 'module.' si DataParallel
+        if any(k.startswith('module.') for k in state_dict.keys()):
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
         try:
-            model = build_model(
-                name=self.model_name,
-                encoder_name=self.encoder_name,
-                in_channels=self.in_channels,
-                classes=self.num_classes
-            )
-        except Exception as e:
-            print(f"✗ Error building model: {e}")
-            print("\nTrying alternative approaches...")
-            
-            # Try with common model names
-            for alt_name in ['unet', 'unet-dropout', 'deeplabv3', 'deeplabv3+', 'fpn']:
-                try:
-                    print(f"  Trying with model name: {alt_name}")
-                    model = build_model(
-                        name=alt_name,
-                        encoder_name=self.encoder_name,
-                        in_channels=self.in_channels,
-                        classes=self.num_classes
-                    )
-                    self.model_name = alt_name
-                    print(f"✓ Success with {alt_name}")
-                    break
-                except:
-                    continue
-            else:
-                raise ValueError(f"Could not build model with any architecture")
-        
-        # Load weights
-        try:
-            # Remove 'module.' prefix if present (from DataParallel)
-            if any(key.startswith('module.') for key in model_state_dict.keys()):
-                model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
-            
-            model.load_state_dict(model_state_dict)
-            print("✓ Model weights loaded successfully")
-        except Exception as e:
-            print(f"⚠ Warning: Error loading state dict: {e}")
-            print("Attempting to load with strict=False...")
-            try:
-                model.load_state_dict(model_state_dict, strict=False)
-                print("✓ Model weights loaded with strict=False")
-            except Exception as e2:
-                print(f"✗ Critical error: {e2}")
-                raise
-        
+            model.load_state_dict(state_dict, strict=True)
+            print("  ✓ Poids chargés avec succès (strict=True)")
+        except RuntimeError as e:
+            print(f"  ⚠ Chargement strict échoué: {e}")
+            print("  → Tentative avec strict=False...")
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"    Clés manquantes ({len(missing)}): {missing[:5]}...")
+            if unexpected:
+                print(f"    Clés inattendues ({len(unexpected)}): {unexpected[:5]}...")
+            print("  ✓ Poids chargés avec strict=False")
+
         model.to(self.device)
         model.eval()
-        
+        print(f"  ✓ Modèle en mode eval sur {self.device}")
+
+        # Compter les paramètres
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"  ✓ Paramètres totaux: {total_params:,}")
+
         return model
-    
-    def _normalize_patch(self, patch):
+
+    def _update_params_from_config(self, config: dict):
+        """Met à jour les paramètres depuis la config sauvegardée"""
+        detected = {}
+        for key in ['model_name', 'encoder_name', 'in_channels', 'num_classes', 'mode',
+                     'patch_size', 'dropout_rate']:
+            if key in config:
+                detected[key] = config[key]
+
+        if detected:
+            print(f"\n  Config détectée dans le checkpoint:")
+            for k, v in detected.items():
+                print(f"    {k}: {v}")
+
+            # === Auto-correction du dropout_rate depuis le checkpoint ===
+            if 'dropout_rate' in detected and detected['dropout_rate'] != self.dropout_rate:
+                old_dr = self.dropout_rate
+                self.dropout_rate = detected['dropout_rate']
+                print(f"  → dropout_rate auto-corrigé: {old_dr} → {self.dropout_rate} (depuis checkpoint)")
+
+            # === Auto-correction num_classes pour le mode binary ===
+            # Dans le training v3, config sauvegarde num_classes=2 (le paramètre CLI)
+            # mais le modèle réel a 1 sortie quand mode=binary.
+            # On détecte et on corrige automatiquement.
+            detected_mode = detected.get('mode', None)
+            if detected_mode == 'binary' and self.num_classes != 1:
+                print(f"  → Mode binary détecté: num_classes forcé à 1 (sortie Sigmoid)")
+                self.num_classes = 1
+                self.mode = 'binary'
+            elif detected_mode == 'binary' and self.num_classes == 1:
+                self.mode = 'binary'
+
+            # Avertissements si décalage (les args CLI priment sauf pour les auto-corrections)
+            if 'model_name' in detected and detected['model_name'] != self.model_name:
+                print(f"  ⚠ Attention: model_name checkpoint='{detected['model_name']}' vs CLI='{self.model_name}'")
+            if 'in_channels' in detected and detected['in_channels'] != self.in_channels:
+                print(f"  ⚠ Attention: in_channels checkpoint={detected['in_channels']} vs CLI={self.in_channels}")
+            if 'encoder_name' in detected and detected['encoder_name'] != self.encoder_name:
+                print(f"  ⚠ Note: encoder_name checkpoint='{detected['encoder_name']}' vs CLI='{self.encoder_name}'")
+
+    # ------------------------------------------------------------------
+    # NORMALISATION (parité exacte avec l'entraînement)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def normalize_patch(patch: np.ndarray) -> np.ndarray:
         """
-        Normalize patch similar to training pipeline
-        
+        Normalisation identique à SegmentationDataset.__getitem__() du script
+        d'entraînement train_modern_architectures_v3_kfold.py.
+
+        Méthode: percentile 99 global sur le patch, puis clip [0, 1].
+        C'est une normalisation GLOBALE (pas par canal) pour rester en parité.
+
         Args:
-            patch: Input patch (C, H, W)
-        
+            patch: (C, H, W) en float32
+
         Returns:
-            Normalized patch (C, H, W)
+            patch normalisé (C, H, W) dans [0, 1]
         """
         patch = patch.astype(np.float32)
-        
-        if self.normalize_per_channel:
-            # Normalize each channel separately
-            normalized = np.zeros_like(patch)
-            for c in range(patch.shape[0]):
-                channel = patch[c]
-                if np.max(channel) > 0:
-                    # Robust normalization with percentile
-                    p_val = np.percentile(channel, self.normalization_percentile)
-                    if p_val > 0:
-                        channel_norm = np.clip(channel / p_val, 0, 1)
-                    else:
-                        channel_norm = np.zeros_like(channel)
-                else:
-                    channel_norm = np.zeros_like(channel)
-                normalized[c] = channel_norm
+        if patch.max() > 0:
+            p99 = np.percentile(patch, 99)
+            patch = np.clip(patch / (p99 + 1e-6), 0, 1)
+        return patch
+
+    # ------------------------------------------------------------------
+    # FENÊTRE DE PONDÉRATION GAUSSIENNE
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_gaussian_window(height: int, width: int, sigma_scale: float = 0.25) -> np.ndarray:
+        """
+        Crée une fenêtre de pondération gaussienne 2D pour la fusion seamless.
+
+        Le centre du patch a le poids maximal (1.0), les bords ont un poids
+        faible. Cela élimine les artefacts de grille dans les zones de
+        recouvrement.
+
+        Args:
+            height: Hauteur du patch
+            width: Largeur du patch
+            sigma_scale: Proportion de la taille pour sigma (0.25 = sigma = size/4)
+
+        Returns:
+            Fenêtre gaussienne (H, W)
+        """
+        sigma_y = height * sigma_scale
+        sigma_x = width * sigma_scale
+
+        y = np.arange(height) - (height - 1) / 2.0
+        x = np.arange(width) - (width - 1) / 2.0
+
+        gy = np.exp(-(y ** 2) / (2 * sigma_y ** 2))
+        gx = np.exp(-(x ** 2) / (2 * sigma_x ** 2))
+
+        window = np.outer(gy, gx).astype(np.float32)
+
+        # Normaliser pour que le max = 1.0
+        window /= window.max()
+
+        # Plancher minimal pour éviter les zones à poids nul
+        window = np.clip(window, 0.01, 1.0)
+
+        return window
+
+    # ------------------------------------------------------------------
+    # EXTRACTION DES PATCHES
+    # ------------------------------------------------------------------
+
+    def _extract_patch_grid(self, img_height: int, img_width: int):
+        """
+        Calcule les positions (x, y) de la grille de patches avec overlap.
+
+        Returns:
+            Liste de tuples (x, y) correspondant au coin supérieur-gauche
+        """
+        step = self.patch_size - self.overlap
+        step = max(step, 1)
+
+        positions = []
+
+        y = 0
+        while y < img_height:
+            x = 0
+            while x < img_width:
+                # Ajustement pour ne pas dépasser
+                actual_x = min(x, max(0, img_width - self.patch_size))
+                actual_y = min(y, max(0, img_height - self.patch_size))
+                positions.append((actual_x, actual_y))
+                x += step
+                if x >= img_width and (x - step + self.patch_size) < img_width:
+                    # Ajouter un dernier patch calé à droite
+                    positions.append((max(0, img_width - self.patch_size), actual_y))
+                    break
+            y += step
+            if y >= img_height and (y - step + self.patch_size) < img_height:
+                # Ajouter une dernière rangée calée en bas
+                x = 0
+                while x < img_width:
+                    actual_x = min(x, max(0, img_width - self.patch_size))
+                    positions.append((actual_x, max(0, img_height - self.patch_size)))
+                    x += step
+                    if x >= img_width and (x - step + self.patch_size) < img_width:
+                        positions.append((max(0, img_width - self.patch_size),
+                                         max(0, img_height - self.patch_size)))
+                        break
+                break
+
+        # Dédupliquer
+        positions = list(dict.fromkeys(positions))
+        return positions
+
+    # ------------------------------------------------------------------
+    # INFÉRENCE PAR BATCH
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _predict_batch(self, batch_tensor: torch.Tensor) -> np.ndarray:
+        """
+        Inférence sur un batch de patches.
+
+        Args:
+            batch_tensor: (B, C, H, W) tensor sur le device
+
+        Returns:
+            Probabilités numpy:
+              - Binary: (B, H, W)
+              - Multiclass: (B, num_classes, H, W)
+        """
+        output = self.model(batch_tensor)
+
+        # Gérer différents formats de sortie
+        if isinstance(output, dict):
+            output = output.get('out', output.get('logits', list(output.values())[0]))
+        elif isinstance(output, (tuple, list)):
+            output = output[0]
+
+        if self.mode == 'binary':
+            probs = torch.sigmoid(output).squeeze(1)  # (B, H, W)
         else:
-            # Global normalization
-            if np.max(patch) > 0:
-                p_val = np.percentile(patch, self.normalization_percentile)
-                if p_val > 0:
-                    normalized = np.clip(patch / p_val, 0, 1)
-                else:
-                    normalized = np.zeros_like(patch)
-            else:
-                normalized = np.zeros_like(patch)
-        
-        return normalized
-    
-    def _create_weight_mask(self, height, width):
+            probs = torch.softmax(output, dim=1)  # (B, C, H, W)
+
+        return probs.cpu().numpy()
+
+    # ------------------------------------------------------------------
+    # PRÉDICTION PRINCIPALE
+    # ------------------------------------------------------------------
+
+    def predict(self, input_path: str, output_path: str,
+                save_confidence: bool = False, output_nodata: int = 255):
         """
-        Create weight mask for seamless blending
-        
+        Prédit une image grand format avec reconstruction seamless.
+
         Args:
-            height: Mask height
-            width: Mask width
-        
-        Returns:
-            Weight mask with linear falloff at edges
+            input_path: Chemin vers le GeoTIFF d'entrée
+            output_path: Chemin de sortie pour le masque GeoTIFF
+            save_confidence: Sauvegarder la carte de confiance
+            output_nodata: Valeur NoData pour la sortie
         """
-        weight = np.ones((height, width), dtype=np.float32)
-        
-        if self.overlap > 0:
-            border = min(self.overlap // 2, min(height, width) // 2)
-            
-            if border > 0:
-                # Linear falloff from edge to center
-                for i in range(border):
-                    # Weight increases from edge to center
-                    factor = (i + 1) / border
-                    
-                    # Apply to borders
-                    weight[i, :] *= factor  # Top
-                    weight[height-1-i, :] *= factor  # Bottom
-                    weight[:, i] *= factor  # Left
-                    weight[:, width-1-i] *= factor  # Right
-        
-        return weight
-    
-    def _predict_single_patch(self, patch):
-        """
-        Predict probabilities for a single patch
-        
-        Args:
-            patch: Normalized patch (C, H, W)
-        
-        Returns:
-            Probabilities tensor
-        """
-        with torch.no_grad():
-            # Ensure correct number of channels
-            if patch.shape[0] != self.in_channels:
+        print(f"\n{'=' * 70}")
+        print("DÉMARRAGE DE LA PRÉDICTION")
+        print(f"{'=' * 70}")
+
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Image d'entrée introuvable: {input_path}")
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        # ====== ÉTAPE 1: Lire les métadonnées ======
+        print(f"\n[1/4] Lecture des métadonnées...")
+        with rasterio.open(input_path) as src:
+            profile = src.profile.copy()
+            img_height = src.height
+            img_width = src.width
+            img_channels = src.count
+            nodata_value = profile.get('nodata', None)
+            crs = src.crs
+            transform = src.transform
+
+        print(f"  Taille   : {img_width} x {img_height} pixels")
+        print(f"  Canaux   : {img_channels}")
+        print(f"  CRS      : {crs}")
+        print(f"  NoData   : {nodata_value}")
+
+        if img_channels != self.in_channels:
+            print(f"  ⚠ L'image a {img_channels} canaux, le modèle attend {self.in_channels}")
+            if img_channels < self.in_channels:
+                print(f"    → Les canaux seront répétés pour correspondre")
+
+        # Gestion des images plus petites que le patch
+        if img_height < self.patch_size or img_width < self.patch_size:
+            print(f"  ⚠ Image plus petite que le patch_size ({self.patch_size})")
+            print(f"    → L'image sera paddée")
+
+        # ====== ÉTAPE 2: Calculer la grille ======
+        print(f"\n[2/4] Calcul de la grille de patches...")
+
+        # Padder si nécessaire
+        pad_h = max(0, self.patch_size - img_height)
+        pad_w = max(0, self.patch_size - img_width)
+        effective_h = img_height + pad_h
+        effective_w = img_width + pad_w
+
+        positions = self._extract_patch_grid(effective_h, effective_w)
+        n_patches = len(positions)
+
+        step = self.patch_size - self.overlap
+        print(f"  Grille   : {n_patches} patches")
+        print(f"  Step     : {step} pixels")
+        print(f"  Overlap  : {self.overlap} pixels")
+
+        # ====== ÉTAPE 3: Prédiction par batch ======
+        print(f"\n[3/4] Prédiction des patches (batch_size={self.batch_size})...")
+
+        # Accumulateurs pour la reconstruction
+        if self.mode == 'binary':
+            weighted_sum = np.zeros((effective_h, effective_w), dtype=np.float64)
+        else:
+            weighted_sum = np.zeros((self.num_classes, effective_h, effective_w), dtype=np.float64)
+        weight_sum = np.zeros((effective_h, effective_w), dtype=np.float64)
+
+        # Traitement par batch
+        with rasterio.open(input_path) as src:
+            batch_patches = []
+            batch_positions = []
+
+            for pos_idx in tqdm(range(n_patches), desc="Prédiction", unit="patch"):
+                x, y = positions[pos_idx]
+
+                # Lire le patch depuis le raster (en tenant compte du padding)
+                read_x = min(x, img_width - 1)
+                read_y = min(y, img_height - 1)
+                read_w = min(self.patch_size, img_width - read_x)
+                read_h = min(self.patch_size, img_height - read_y)
+
+                window = Window(read_x, read_y, read_w, read_h)
+                patch = src.read(window=window)  # (C, H, W)
+
+                # Padder si le patch est plus petit que patch_size
+                if patch.shape[1] < self.patch_size or patch.shape[2] < self.patch_size:
+                    padded = np.zeros((patch.shape[0], self.patch_size, self.patch_size),
+                                     dtype=patch.dtype)
+                    padded[:, :patch.shape[1], :patch.shape[2]] = patch
+                    patch = padded
+
+                # Adapter le nombre de canaux
                 if patch.shape[0] < self.in_channels:
-                    # Repeat last channel if needed
                     repeats = math.ceil(self.in_channels / patch.shape[0])
                     patch = np.repeat(patch, repeats, axis=0)[:self.in_channels]
-                else:
-                    # Take first n channels
+                elif patch.shape[0] > self.in_channels:
                     patch = patch[:self.in_channels]
-            
-            # Add batch dimension and convert to tensor
-            input_tensor = torch.from_numpy(patch).unsqueeze(0).float().to(self.device)
-            
-            # Forward pass
-            output = self.model(input_tensor)
-            
-            # Handle different output formats
-            if isinstance(output, dict):
-                output = output['out'] if 'out' in output else output['logits']
-            elif isinstance(output, tuple):
-                output = output[0]
-            
-            # Apply appropriate activation
-            if self.num_classes == 1:
-                # Binary: sigmoid
-                probabilities = torch.sigmoid(output)
-                return probabilities.squeeze().cpu().numpy()  # (H, W)
-            else:
-                # Multi-class: softmax
-                probabilities = torch.softmax(output, dim=1)
-                return probabilities.squeeze(0).cpu().numpy()  # (C, H, W)
-    
-    def _extract_patches(self, image_path):
-        """
-        Extract patches from large image with grid
-        
-        Args:
-            image_path: Path to input image
-        
-        Returns:
-            patches_info, profile, original_shape, nodata_value
-        """
-        with rasterio.open(image_path) as src:
-            profile = src.profile.copy()
-            height, width = src.height, src.width
-            num_channels = src.count
-            nodata_value = profile.get('nodata', None)
-            
-            print(f"\nImage information:")
-            print(f"  Size: {width} x {height} pixels")
-            print(f"  Channels: {num_channels}")
-            print(f"  Data type: {src.dtypes[0]}")
-            print(f"  Nodata value: {nodata_value}")
-            
-            if num_channels != self.in_channels:
-                print(f"⚠ Warning: Image has {num_channels} channels, model expects {self.in_channels}")
-                if num_channels < self.in_channels:
-                    print(f"  Will repeat channels to match model input")
-            
-            # Calculate grid
-            step = self.patch_size - self.overlap
-            step = max(step, 1)
-            
-            n_patches_x = max(1, math.ceil(width / step))
-            n_patches_y = max(1, math.ceil(height / step))
-            
-            # Adjust to ensure coverage
-            actual_width = (n_patches_x - 1) * step + self.patch_size
-            actual_height = (n_patches_y - 1) * step + self.patch_size
-            
-            if actual_width < width:
-                n_patches_x += 1
-            if actual_height < height:
-                n_patches_y += 1
-            
-            print(f"\nPatch extraction:")
-            print(f"  Grid: {n_patches_x} x {n_patches_y} = {n_patches_x * n_patches_y} patches")
-            print(f"  Step: {step} pixels")
-            
-            patches_info = []
-            
-            # Extract patches
-            for i in tqdm(range(n_patches_y), desc="Extracting patches"):
-                for j in range(n_patches_x):
-                    # Calculate position
-                    x = j * step
-                    y = i * step
-                    
-                    # Adjust for borders
-                    if x + self.patch_size > width:
-                        x = width - self.patch_size
-                    if y + self.patch_size > height:
-                        y = height - self.patch_size
-                    
-                    x, y = max(0, x), max(0, y)
-                    
-                    # Read patch
-                    window = Window(x, y, self.patch_size, self.patch_size)
-                    patch = src.read(window=window)
-                    
-                    # Check for nodata
-                    has_nodata = False
-                    if nodata_value is not None:
-                        has_nodata = np.any(patch == nodata_value)
-                    
-                    patches_info.append({
-                        'patch': patch,
-                        'window': window,
-                        'coords': (x, y),
-                        'has_nodata': has_nodata
-                    })
-            
-            return patches_info, profile, (height, width), nodata_value
-    
-    def _reconstruct_image(self, predicted_patches, original_shape):
-        """
-        Reconstruct image using weighted blending
-        
-        Args:
-            predicted_patches: List of patches with predictions
-            original_shape: (height, width) of original image
-        
-        Returns:
-            reconstructed_mask, confidence_map
-        """
-        height, width = original_shape
-        
+
+                # Normalisation identique à l'entraînement
+                patch_norm = self.normalize_patch(patch)
+
+                batch_patches.append(patch_norm)
+                batch_positions.append((x, y))
+
+                # Quand le batch est plein ou c'est le dernier patch
+                if len(batch_patches) == self.batch_size or pos_idx == n_patches - 1:
+                    batch_tensor = torch.from_numpy(np.stack(batch_patches)).float().to(self.device)
+                    batch_probs = self._predict_batch(batch_tensor)
+
+                    # Accumuler chaque patch du batch
+                    for b_idx in range(len(batch_patches)):
+                        bx, by = batch_positions[b_idx]
+                        probs = batch_probs[b_idx]
+
+                        # Déterminer la taille effective (sans padding)
+                        eff_h = min(self.patch_size, effective_h - by)
+                        eff_w = min(self.patch_size, effective_w - bx)
+
+                        # Fenêtre gaussienne (tronquée si nécessaire)
+                        gw = self.gaussian_window[:eff_h, :eff_w]
+
+                        if self.mode == 'binary':
+                            weighted_sum[by:by + eff_h, bx:bx + eff_w] += probs[:eff_h, :eff_w] * gw
+                        else:
+                            for c in range(self.num_classes):
+                                weighted_sum[c, by:by + eff_h, bx:bx + eff_w] += probs[c, :eff_h, :eff_w] * gw
+
+                        weight_sum[by:by + eff_h, bx:bx + eff_w] += gw
+
+                    batch_patches.clear()
+                    batch_positions.clear()
+
+        # ====== ÉTAPE 4: Reconstruction et sauvegarde ======
+        print(f"\n[4/4] Reconstruction et sauvegarde...")
+
+        # Éviter la division par zéro
+        weight_sum = np.maximum(weight_sum, 1e-8)
+
         if self.mode == 'binary':
-            return self._reconstruct_binary(predicted_patches, height, width)
+            final_probs = weighted_sum / weight_sum
+            # Tronquer au format original (retirer le padding)
+            final_probs = final_probs[:img_height, :img_width]
+            final_mask = (final_probs > self.threshold).astype(np.uint8)
+            confidence = np.where(final_probs > self.threshold, final_probs, 1 - final_probs)
         else:
-            return self._reconstruct_multiclass(predicted_patches, height, width)
-    
-    def _reconstruct_binary(self, predicted_patches, height, width):
-        """
-        Reconstruct binary segmentation
-        """
-        # Initialize accumulation arrays
-        weighted_sum = np.zeros((height, width), dtype=np.float32)
-        weight_sum = np.zeros((height, width), dtype=np.float32)
-        
-        print("Reconstructing binary mask...")
-        
-        for patch_info in tqdm(predicted_patches, desc="Blending patches"):
-            probs = patch_info['probs']  # (H, W) probabilities
-            window = patch_info['window']
-            x, y = int(window.col_off), int(window.row_off)
-            h, w = probs.shape
-            
-            # Create weight mask
-            weight_mask = self._create_weight_mask(h, w)
-            
-            # Accumulate
-            weighted_sum[y:y+h, x:x+w] += probs * weight_mask
-            weight_sum[y:y+h, x:x+w] += weight_mask
-        
-        # Avoid division by zero
-        weight_sum = np.maximum(weight_sum, 1e-8)
-        
-        # Final probability map
-        final_probs = weighted_sum / weight_sum
-        
-        # Convert to binary mask
-        foreground_value = 1 if self.background_value == 0 else 0
-        binary_mask = np.where(final_probs > self.threshold, 
-                              foreground_value, 
-                              self.background_value).astype(np.uint8)
-        
-        # Confidence map
-        confidence = np.where(final_probs > self.threshold, 
-                             final_probs, 
-                             1 - final_probs)
-        
-        return binary_mask, confidence
-    
-    def _reconstruct_multiclass(self, predicted_patches, height, width):
-        """
-        Reconstruct multi-class segmentation
-        """
-        # Initialize accumulation arrays
-        weighted_sums = np.zeros((self.num_classes, height, width), dtype=np.float32)
-        weight_sum = np.zeros((height, width), dtype=np.float32)
-        
-        print(f"Reconstructing {self.num_classes}-class mask...")
-        
-        for patch_info in tqdm(predicted_patches, desc="Blending patches"):
-            probs = patch_info['probs']  # (C, H, W) probabilities
-            window = patch_info['window']
-            x, y = int(window.col_off), int(window.row_off)
-            h, w = probs.shape[1], probs.shape[2]
-            
-            # Create weight mask
-            weight_mask = self._create_weight_mask(h, w)
-            
-            # Accumulate for each class
             for c in range(self.num_classes):
-                class_probs = probs[c]
-                weighted_sums[c, y:y+h, x:x+w] += class_probs * weight_mask
-            
-            weight_sum[y:y+h, x:x+w] += weight_mask
-        
-        # Normalize
-        weight_sum = np.maximum(weight_sum, 1e-8)
-        for c in range(self.num_classes):
-            weighted_sums[c] /= weight_sum
-        
-        # Final class assignment (argmax)
-        class_mask = np.argmax(weighted_sums, axis=0).astype(np.uint8)
-        
-        # Confidence map (max probability)
-        confidence = np.max(weighted_sums, axis=0)
-        
-        return class_mask, confidence
-    
-    def predict_large_image(self, input_image_path, output_path, 
-                           save_confidence=False, save_patches=False,
-                           output_nodata=255):
-        """
-        Main prediction function for large images
-        
-        Args:
-            input_image_path: Path to input image
-            output_path: Path for output segmentation
-            save_confidence: Save confidence map
-            save_patches: Save individual patches
-            output_nodata: Nodata value for output
-        """
-        print(f"\n{'='*70}")
-        print("STARTING PREDICTION")
-        print(f"{'='*70}")
-        
-        # Step 1: Extract patches
-        print(f"\n[1/4] Extracting patches...")
-        patches_info, profile, original_shape, input_nodata = self._extract_patches(input_image_path)
-        
-        # Step 2: Predict on patches
-        print(f"\n[2/4] Predicting patches...")
-        for patch_info in tqdm(patches_info, desc="Predicting"):
-            patch = patch_info['patch']
-            
-            # Handle nodata if present
-            if patch_info['has_nodata'] and input_nodata is not None:
-                # Create mask for valid pixels
-                valid_mask = np.all(patch != input_nodata, axis=0)
-                patch_info['valid_mask'] = valid_mask
-            else:
-                patch_info['valid_mask'] = None
-            
-            # Normalize patch
-            normalized = self._normalize_patch(patch)
-            
-            # Get probabilities
-            probs = self._predict_single_patch(normalized)
-            patch_info['probs'] = probs
-            
-            # Save patch if requested
-            if save_patches:
-                self._save_patch(patch_info, profile, output_nodata)
-        
-        # Step 3: Reconstruct with weighted blending
-        print(f"\n[3/4] Reconstructing image...")
-        final_mask, confidence = self._reconstruct_image(patches_info, original_shape)
-        
-        # Handle nodata from source
-        if input_nodata is not None:
-            print("Applying source nodata mask...")
-            with rasterio.open(input_image_path) as src:
+                weighted_sum[c] /= weight_sum
+            weighted_sum = weighted_sum[:, :img_height, :img_width]
+            final_mask = np.argmax(weighted_sum, axis=0).astype(np.uint8)
+            confidence = np.max(weighted_sum, axis=0).astype(np.float32)
+
+        # Appliquer le masque NoData d'origine
+        if nodata_value is not None:
+            print("  Application du masque NoData source...")
+            with rasterio.open(input_path) as src:
                 first_band = src.read(1)
-                nodata_mask = (first_band == input_nodata)
+                nodata_mask = (first_band == nodata_value)
                 if np.any(nodata_mask):
                     final_mask[nodata_mask] = output_nodata
-                    if save_confidence:
-                        confidence[nodata_mask] = 0
-        
-        # Step 4: Save results
-        print(f"\n[4/4] Saving results...")
-        
-        # Save main mask
+                    confidence[nodata_mask] = 0
+
+        # Sauvegarder le masque
         output_profile = profile.copy()
         output_profile.update({
             'dtype': 'uint8',
@@ -608,223 +949,213 @@ class LargeImagePredictorHybrid:
             'compress': 'lzw',
             'nodata': output_nodata
         })
-        
+
         with rasterio.open(output_path, 'w', **output_profile) as dst:
             dst.write(final_mask, 1)
-        
-        print(f"✓ Segmentation saved: {output_path}")
-        
-        # Save confidence map if requested
+        print(f"  ✓ Masque sauvegardé: {output_path}")
+
+        # Sauvegarder la carte de confiance
         if save_confidence:
             base_name = os.path.splitext(output_path)[0]
-            confidence_path = f"{base_name}_confidence.tif"
-            
-            confidence_profile = output_profile.copy()
-            confidence_profile.update({
+            conf_path = f"{base_name}_confidence.tif"
+            conf_profile = output_profile.copy()
+            conf_profile.update({
                 'dtype': 'float32',
                 'nodata': -9999.0
             })
-            
-            with rasterio.open(confidence_path, 'w', **confidence_profile) as dst:
+            with rasterio.open(conf_path, 'w', **conf_profile) as dst:
                 dst.write(confidence.astype(np.float32), 1)
-            
-            print(f"✓ Confidence map saved: {confidence_path}")
-        
-        # Print statistics
-        self._print_statistics(final_mask, confidence, output_profile.get('transform'))
-        
-        # Cleanup
-        import shutil
-        if not save_patches and os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir)
-        
-        print(f"\n{'='*70}")
-        print("PREDICTION COMPLETED")
-        print(f"{'='*70}")
-    
-    def _save_patch(self, patch_info, profile, output_nodata):
-        """Save individual patch"""
-        x, y = patch_info['coords']
-        probs = patch_info['probs']
-        
-        if self.mode == 'binary':
-            patch_mask = (probs > self.threshold).astype(np.uint8)
-            if self.background_value == 0:
-                patch_mask = patch_mask  # Already 0/1
-            else:
-                patch_mask = np.where(patch_mask == 1, 0, 1)  # Invert
-        else:
-            patch_mask = np.argmax(probs, axis=0).astype(np.uint8)
-        
-        patch_path = os.path.join(self.temp_dir, f"patch_{y}_{x}.tif")
-        patch_profile = profile.copy()
-        patch_profile.update({
-            'height': patch_mask.shape[0],
-            'width': patch_mask.shape[1],
-            'transform': rasterio.windows.transform(patch_info['window'], profile['transform']),
-            'count': 1,
-            'dtype': 'uint8',
-            'nodata': output_nodata
-        })
-        
-        with rasterio.open(patch_path, 'w', **patch_profile) as dst:
-            dst.write(patch_mask, 1)
-    
-    def _print_statistics(self, final_mask, confidence, transform):
-        """Print prediction statistics"""
-        valid_mask = final_mask != 255  # Exclude nodata
-        
+            print(f"  ✓ Carte de confiance: {conf_path}")
+
+        # Statistiques
+        self._print_statistics(final_mask, confidence, output_nodata, transform)
+
+        print(f"\n{'=' * 70}")
+        print("PRÉDICTION TERMINÉE")
+        print(f"{'=' * 70}")
+
+    # ------------------------------------------------------------------
+    # STATISTIQUES
+    # ------------------------------------------------------------------
+
+    def _print_statistics(self, mask: np.ndarray, confidence: np.ndarray,
+                          output_nodata: int, geo_transform):
+        """Affiche les statistiques de la prédiction"""
+        valid_mask = mask != output_nodata
         if not np.any(valid_mask):
-            print("No valid pixels in prediction!")
+            print("  Aucun pixel valide dans la prédiction!")
             return
-        
-        valid_pixels = final_mask[valid_mask]
-        
-        print(f"\n{'='*50}")
-        print("PREDICTION STATISTICS")
-        print(f"{'='*50}")
-        
-        # Class distribution
+
+        valid_pixels = mask[valid_mask]
         unique, counts = np.unique(valid_pixels, return_counts=True)
         total = counts.sum()
-        
-        print(f"Class distribution ({self.mode}):")
-        for cls, count in zip(unique, counts):
-            percentage = (count / total) * 100
-            if self.mode == 'binary':
-                label = "Foreground" if cls == 1 else "Background"
-                print(f"  {label}: {count:,} pixels ({percentage:6.2f}%)")
-            else:
-                print(f"  Class {cls:2d}: {count:10,} pixels ({percentage:6.2f}%)")
-        
-        # Confidence statistics
-        if confidence is not None and np.any(valid_mask):
-            valid_conf = confidence[valid_mask]
-            print(f"\nConfidence statistics:")
-            print(f"  Average: {np.mean(valid_conf):.4f}")
-            print(f"  Min: {np.min(valid_conf):.4f}")
-            print(f"  Max: {np.max(valid_conf):.4f}")
-            print(f"  Low (<0.5): {np.sum(valid_conf < 0.5):,} pixels")
-            print(f"  High (>0.8): {np.sum(valid_conf > 0.8):,} pixels")
-        
-        # Area calculation if transform available
-        if transform and hasattr(transform, '__len__') and len(transform) >= 6:
-            pixel_area = abs(transform[0] * transform[4])
-            if pixel_area > 0:
-                total_area = total * pixel_area
-                print(f"\nArea statistics:")
-                print(f"  Pixel size: {abs(transform[0]):.2f} x {abs(transform[4]):.2f} units")
-                print(f"  Total area: {total_area:,.2f} square units")
-    
-    def cleanup(self):
-        """Cleanup temporary directory"""
-        import shutil
-        if os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir)
 
+        print(f"\n  Statistiques de prédiction ({self.mode}):")
+        for cls, count in zip(unique, counts):
+            pct = (count / total) * 100
+            if self.mode == 'binary':
+                label = "Avant-plan" if cls == 1 else "Arrière-plan"
+                print(f"    {label}: {count:,} pixels ({pct:.2f}%)")
+            else:
+                print(f"    Classe {cls:2d}: {count:10,} pixels ({pct:.2f}%)")
+
+        if confidence is not None:
+            valid_conf = confidence[valid_mask]
+            if len(valid_conf) > 0:
+                print(f"\n  Confiance:")
+                print(f"    Moyenne : {np.mean(valid_conf):.4f}")
+                print(f"    Min/Max : {np.min(valid_conf):.4f} / {np.max(valid_conf):.4f}")
+                print(f"    Haute (>0.8): {np.sum(valid_conf > 0.8):,} pixels "
+                      f"({np.sum(valid_conf > 0.8) / len(valid_conf) * 100:.1f}%)")
+
+        # Surface si géoréférencé
+        if geo_transform:
+            try:
+                pixel_area = abs(geo_transform[0] * geo_transform[4])
+                if pixel_area > 0:
+                    total_area = total * pixel_area
+                    print(f"\n  Surface totale: {total_area:,.2f} unités²")
+                    print(f"  Résolution pixel: {abs(geo_transform[0]):.4f} x {abs(geo_transform[4]):.4f}")
+            except (TypeError, IndexError):
+                pass
+
+
+# ============================================================================
+# CLI - INTERFACE EN LIGNE DE COMMANDE
+# ============================================================================
 
 def main():
-    """Command line interface"""
     parser = argparse.ArgumentParser(
-        description='Universal large image predictor for segmentation',
+        description='Prédicteur d\'images grand format pour Modern Architectures v3',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-Examples:
-  # Binary segmentation with default encoder (resnet34)
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif
-  
-  # Specify encoder (must match training encoder!)
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --encoder_name resnet50
-  
-  # Multi-class with 6 classes and EfficientNet encoder
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --num_classes 6 --encoder_name efficientnet-b4
-  
-  # Custom patch size and overlap
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --patch_size 256 --overlap 64
-  
-  # With confidence map
-  python predict_large_image.py --model model.pth --input image.tif --output prediction.tif --save_confidence
+        epilog=f'''
+================================================================================
+EXEMPLES D'UTILISATION
+================================================================================
+
+# Segmentation binaire avec UNet + ResNet34
+python predict_modern_v3.py \\
+    --model_path best_model.pth --input ortho.tif --output prediction.tif \\
+    --model_name unet --encoder_name resnet34 \\
+    --in_channels 4 --num_classes 1 --patch_size 224
+
+# Multiclasse avec SegFormer-B2
+python predict_modern_v3.py \\
+    --model_path segformer_best.pth --input satellite.tif --output classes.tif \\
+    --model_name segformer-b2 --in_channels 4 --num_classes 5 --patch_size 224
+
+# Multiclasse avec DeepLabV3+ et EfficientNet
+python predict_modern_v3.py \\
+    --model_path deeplabv3plus_best.pth --input drone.tif --output seg.tif \\
+    --model_name deeplabv3+ --encoder_name efficientnet-b3 \\
+    --in_channels 3 --num_classes 6 --patch_size 512 --overlap 128
+
+# Avec carte de confiance et batch GPU
+python predict_modern_v3.py \\
+    --model_path model.pth --input image.tif --output result.tif \\
+    --model_name manet --encoder_name resnet50 \\
+    --in_channels 4 --num_classes 2 --batch_size 8 --save_confidence
+
+# K-Fold model (state_dict pur)
+python predict_modern_v3.py \\
+    --model_path best_model_fold_0.pth --input image.tif --output pred.tif \\
+    --model_name unet --encoder_name resnet34 \\
+    --in_channels 4 --num_classes 1 --patch_size 224
+
+================================================================================
+MODÈLES DISPONIBLES
+================================================================================
+  SMP        : unet, unet++, deeplabv3+, deeplabv3, manet, fpn, pan, pspnet, linknet
+  SegFormer  : segformer-b0, segformer-b1, segformer-b2, segformer-b3, segformer-b4, segformer-b5
+  Autres     : unetformer, hrnet-w18, hrnet-w32, hrnet-w48, swin-unet
+================================================================================
         '''
     )
-    
-    # Required arguments
-    parser.add_argument('--model', required=True, help='Path to .pth model file')
-    parser.add_argument('--input', required=True, help='Path to input image')
-    parser.add_argument('--output', required=True, help='Path for output mask')
-    
-    # Model parameters
-    parser.add_argument('--model_name', help='Model architecture name (unet, deeplabv3+, fpn, etc.)')
-    parser.add_argument('--encoder_name', 
-                        help='''Encoder backbone name from SMP library. Popular choices:
-  ResNet: resnet18, resnet34, resnet50, resnet101, resnet152
-  EfficientNet: efficientnet-b0 to efficientnet-b7
-  ResNeXt: resnext50_32x4d, resnext101_32x8d
-  SE-ResNet: se_resnet50, se_resnet101, se_resnet152
-  DenseNet: densenet121, densenet169, densenet201
-  VGG: vgg11_bn, vgg13_bn, vgg16_bn, vgg19_bn
-  MobileNet: mobilenet_v2, timm-mobilenetv3_large_100
-  Full list: https://github.com/qubvel/segmentation_models.pytorch#encoders''')
-    parser.add_argument('--in_channels', type=int, help='Number of input channels')
-    parser.add_argument('--num_classes', type=int, help='Number of output classes')
-    
-    # Processing parameters
-    parser.add_argument('--patch_size', type=int, default=512, help='Patch size')
-    parser.add_argument('--overlap', type=int, default=128, help='Overlap between patches')
-    parser.add_argument('--threshold', type=float, default=0.5, help='Threshold for binary')
-    parser.add_argument('--background_value', type=int, default=0, help='Background value')
-    parser.add_argument('--normalization_percentile', type=int, default=99, help='Percentile for normalization')
-    parser.add_argument('--normalize_per_channel', action='store_true', help='Normalize each channel separately')
-    parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='Device for inference')
-    
-    # Output options
-    parser.add_argument('--save_confidence', action='store_true', help='Save confidence map')
-    parser.add_argument('--save_patches', action='store_true', help='Save individual patches')
-    parser.add_argument('--output_nodata', type=int, default=255, help='Nodata value for output')
-    
+
+    # Arguments requis
+    req = parser.add_argument_group('Arguments requis')
+    req.add_argument('--model_path', required=True, help='Chemin vers le fichier .pth')
+    req.add_argument('--input', required=True, help='Chemin vers l\'image GeoTIFF d\'entrée')
+    req.add_argument('--output', required=True, help='Chemin de sortie pour le masque GeoTIFF')
+    req.add_argument('--model_name', required=True,
+                     help='Architecture du modèle (unet, segformer-b2, deeplabv3+, etc.)')
+    req.add_argument('--encoder_name', default='resnet34',
+                     help='Backbone encoder (resnet34, efficientnet-b3, etc.) [défaut: resnet34]')
+    req.add_argument('--in_channels', type=int, required=True,
+                     help='Nombre de canaux d\'entrée (ex: 3 pour RGB, 4 pour RGBN)')
+    req.add_argument('--num_classes', type=int, required=True,
+                     help='Nombre de classes (1 = binaire, N = multiclasse)')
+
+    # Arguments optionnels
+    opt = parser.add_argument_group('Arguments optionnels')
+    opt.add_argument('--patch_size', type=int, default=224,
+                     help='Taille des patches en pixels [défaut: 224]')
+    opt.add_argument('--overlap', type=int, default=112,
+                     help='Chevauchement entre patches en pixels [défaut: 112]')
+    opt.add_argument('--batch_size', type=int, default=4,
+                     help='Taille de batch pour l\'inférence GPU [défaut: 4]')
+    opt.add_argument('--threshold', type=float, default=0.5,
+                     help='Seuil pour segmentation binaire [défaut: 0.5]')
+    opt.add_argument('--dropout_rate', type=float, default=0.3,
+                     help='Taux de dropout du modèle [défaut: 0.3]')
+    opt.add_argument('--device', default='cuda', choices=['cuda', 'cpu'],
+                     help='Device d\'inférence [défaut: cuda]')
+    opt.add_argument('--output_nodata', type=int, default=255,
+                     help='Valeur NoData pour la sortie [défaut: 255]')
+    opt.add_argument('--save_confidence', action='store_true',
+                     help='Sauvegarder la carte de confiance')
+
+    # Utilitaire
+    parser.add_argument('--list_models', action='store_true',
+                        help='Lister les modèles disponibles et quitter')
+
     args = parser.parse_args()
-    
-    # Validate
-    if not os.path.exists(args.model):
-        print(f"✗ Error: Model not found: {args.model}")
+
+    # Lister les modèles
+    if args.list_models:
+        print("\nModèles disponibles:")
+        for m in ModelFactory.list_models():
+            print(f"  - {m}")
+        return
+
+    # Validations
+    if not os.path.exists(args.model_path):
+        print(f"✗ Erreur: Fichier modèle introuvable: {args.model_path}")
         sys.exit(1)
-    
+
     if not os.path.exists(args.input):
-        print(f"✗ Error: Input image not found: {args.input}")
+        print(f"✗ Erreur: Image d'entrée introuvable: {args.input}")
         sys.exit(1)
-    
-    # Create output directory
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    
+
+    # Lancer la prédiction
     try:
-        predictor = LargeImagePredictorHybrid(
-            model_path=args.model,
+        predictor = LargeImagePredictor(
+            model_path=args.model_path,
             model_name=args.model_name,
             encoder_name=args.encoder_name,
             in_channels=args.in_channels,
             num_classes=args.num_classes,
             patch_size=args.patch_size,
             overlap=args.overlap,
-            device=args.device,
+            batch_size=args.batch_size,
             threshold=args.threshold,
-            normalization_percentile=args.normalization_percentile,
-            background_value=args.background_value,
-            normalize_per_channel=args.normalize_per_channel
+            device=args.device,
+            dropout_rate=args.dropout_rate
         )
-        
-        predictor.predict_large_image(
-            input_image_path=args.input,
+
+        predictor.predict(
+            input_path=args.input,
             output_path=args.output,
             save_confidence=args.save_confidence,
-            save_patches=args.save_patches,
             output_nodata=args.output_nodata
         )
-        
+
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n✗ Erreur: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
