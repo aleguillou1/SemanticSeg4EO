@@ -8,6 +8,7 @@
 
 SemanticSeg4EO is a state-of-the-art framework for semantic segmentation of satellite and aerial imagery, supporting both binary and multi-class segmentation through a unified, production-ready codebase. The system integrates modern deep learning architectures specifically optimized for remote sensing applications, with emphasis on methodological transparency, reproducibility, and experimental flexibility.
 
+![SemanticSeg4EO](figs/logo$.png)
 ---
 
 ## 🌟 Highlights
