@@ -1,10 +1,46 @@
-torch>=1.10.0
-torchvision>=0.11.0
-numpy>=1.21.0
-rasterio>=1.2.0
-tifffile>=2021.7.2
-segmentation-models-pytorch>=0.3.0
+# ==============================================================================
+#  SemanticSeg4EO — Requirements
+# ==============================================================================
+#
+#  STEP 1 — Install PyTorch FIRST (pick ONE line below):
+#
+#    CPU only:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+#    GPU – CUDA 11.8:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+#    GPU – CUDA 12.1:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+#    GPU – CUDA 12.4:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+#  STEP 2 — Then install everything else:
+#      pip install -r requirements.txt
+#
+# ==============================================================================
+
+# --- Core (required) ---------------------------------------------------------
+numpy>=1.21.0,<2.0.0
+scipy>=1.7.0
+scikit-learn>=0.24.0
 matplotlib>=3.4.0
 tqdm>=4.62.0
-scipy>=1.7.0
-scikit-learn >=1.8.0
+
+# --- Geospatial (required for patch extraction & prediction) -----------------
+rasterio>=1.2.0
+geopandas>=0.10.0
+opencv-python>=4.5.0
+
+# --- Image I/O (required for training) --------------------------------------
+tifffile>=2021.7.2
+imagecodecs>=2021.8.0
+
+# --- Deep learning models (Mandatory for SMP Model and Encoder) -------------------------------------
+segmentation-models-pytorch>=0.3.0
+
+# --- Modern architectures (optional – SegFormer, HRNet, SwinUNet) -----------
+# Uncomment if you use SegFormer, HRNet, ConvNeXt, or SwinUNet architectures:
+# transformers>=4.20.0
+# timm>=0.6.0
