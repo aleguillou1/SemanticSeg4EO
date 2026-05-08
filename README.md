@@ -1182,22 +1182,15 @@ If you use SemanticSeg4EO in your research, please cite:
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPL v2 License. See the [LICENSE](LICENSE) file for details.
 
 ```
-MIT License
+## License
 
-Copyright (c) 2024 Adrien Leguillou
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This project is now licensed under the GNU General Public License v2. Original components remain under their respective MIT licenses where noted.
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License.
 ```
 
 ---
